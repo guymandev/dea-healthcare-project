@@ -1,0 +1,17 @@
+# data files
+*.csv
+*.db
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
