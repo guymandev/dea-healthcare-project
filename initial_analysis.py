@@ -118,117 +118,78 @@ def is_idish_col(col: str) -> bool:
     ])
 
 BAD_KEYWORDS = [
-    "provider name", "name", "address", "location", "description", "comment", "text",
-    "telephone", "phone"
-    # keep city/zip/county as "usually not keys"
-    "city", "zip", "county"
+    "provider name",      # exclude provider display fields
+    "provider address",
+    "address",
+    "location",
+    "description",
+    "comment",
+    "text",
+    "telephone",
+    "phone",
+    "city/town",
+    "city",
+    "zip",
+    "county"
 ]
 
 def looks_like_bad_key(col: str) -> bool:
     c = col.lower()
     return any(k in c for k in BAD_KEYWORDS)
 
-# Initial function to guess composite keys
-def guess_composite_keys(df: pd.DataFrame, max_candidates: int = 3):
-    """
-    Returns a list of candidate key column lists, e.g.:
-      [['PROVNUM', 'WorkDate'], ['PROVNUM', 'WorkDate', 'CY_Qtr'], ...]
-    """
-    cols = list(df.columns)
+# A function that rates potential keys based on fields that we know are either keys or
+# are likely part of composite keys.
+def key_component_score(col: str) -> int:
+    c = col.lower()
+    score = 0
 
-    id_cols = [c for c in cols if is_idish_col(c)]
-    date_cols = [c for c in cols if is_dateish_col(c)]
+    # primary hub ids
+    if "cms certification number" in c or "(ccn)" in c or c == "ccn":
+        score += 100
+    if "provnum" in c or "provider id" in c:
+        score += 90
+    if "npi" in c:
+        score += 80
+    if "fips" in c:
+        score += 70
 
-    # fallback if heuristics find nothing
-    if not id_cols:
-        id_cols = cols[:5]
-    if not date_cols:
-        date_cols = []
+    # event discriminators
+    if "measure code" in c or ("measure" in c and "code" in c):
+        score += 60
+    if "tag" in c or "prefix" in c or "cycle" in c or "category" in c:
+        score += 55
+    if "penalty type" in c or ("penalty" in c and "type" in c):
+        score += 55
+    if "role" in c or "owner type" in c:
+        score += 50
+    if "owner name" in c or "manager name" in c:
+        score += 50
 
-    # rank by uniqueness ratio (higher is more key-like)
-    n = len(df)
-    def uniq_ratio(c):
-        try:
-            return df[c].nunique(dropna=True) / n if n else 0
-        except Exception:
-            return 0
+    # time discriminators
+    if "start date" in c or "end date" in c or "from date" in c or "through date" in c:
+        score += 45
+    elif "date" in c or "timestamp" in c or "time" in c:
+        score += 25
 
-    id_cols = sorted(id_cols, key=uniq_ratio, reverse=True)[:max_candidates]
-    date_cols = sorted(date_cols, key=uniq_ratio, reverse=True)[:max_candidates]
+    # numeric discriminators
+    if "amount" in c or "percentage" in c or "percent" in c:
+        score += 25
+    if "length" in c and "day" in c:
+        score += 20
 
-    candidates = []
+    return score
 
-    # single-column candidates (rarely true PK, but good signal)
-    for c in id_cols[:2]:
-        candidates.append([c])
-
-    # pair candidates: (best id, best date)
-    if id_cols and date_cols:
-        candidates.append([id_cols[0], date_cols[0]])
-
-    # triple candidate: (best id, best date, another id-like if available)
-    if len(id_cols) >= 2 and date_cols:
-        candidates.append([id_cols[0], date_cols[0], id_cols[1]])
-
-    # de-dupe while preserving order
-    seen = set()
-    uniq = []
-    for cand in candidates:
-        key = tuple(cand)
-        if key not in seen and all(col in df.columns for col in cand):
-            seen.add(key)
-            uniq.append(cand)
-
-    return uniq
-
-# Improved function to guess primary keys
-def guess_key_greedy(df, max_cols=4):
-    n = len(df)
-    if n == 0:
-        return []
-
-    # candidate columns: exclude obvious descriptive stuff
-    cols = [c for c in df.columns if not looks_like_bad_key(c)]
-
-    # prioritize id/date-ish cols first; then allow others
-    prioritized = [c for c in cols if is_idish_col(c) or is_dateish_col(c)]
-    if not prioritized:
-        prioritized = cols
-
-    # ignore columns with lots of nulls (often not key components)
-    null_rate = df.isna().mean()
-    prioritized = [c for c in prioritized if null_rate.get(c, 0) < 0.5]
-
-    # helper: uniqueness ratio for a set of columns
-    def uniq_ratio(key_cols):
-        return df.drop_duplicates(subset=key_cols).shape[0] / n
-
-    # start with the best single column
-    best = max(prioritized, key=lambda c: uniq_ratio([c]))
-    key = [best]
-    best_ratio = uniq_ratio(key)
-
-    # greedily add columns that improve uniqueness most
-    while best_ratio < 1.0 and len(key) < max_cols:
-        improvements = []
-        for c in prioritized:
-            if c in key:
-                continue
-            r = uniq_ratio(key + [c])
-            improvements.append((r, c))
-
-        improvements.sort(reverse=True)
-        if not improvements:
-            break
-
-        next_ratio, next_col = improvements[0]
-        if next_ratio <= best_ratio:  # no improvement
-            break
-
-        key.append(next_col)
-        best_ratio = next_ratio
-
-    return key, best_ratio
+def discriminator_cols(df):
+    cols = []
+    for c in df.columns:
+        cl = c.lower()
+        if "provider name" in cl:
+            continue
+        if any(k in cl for k in ["owner name", "manager name", "amount", "percent", "percentage",
+                                 "length", "days", "measure", "code", "tag", "type", "role",
+                                 "start", "end", "from", "through"]):
+            cols.append(c)
+    return cols
 
 # Even further improved function to guess key fields
 def guess_key_greedy_with_steps(df, max_cols=6):
@@ -241,6 +202,9 @@ def guess_key_greedy_with_steps(df, max_cols=6):
 
     null_rate = df.isna().mean()
     prioritized = [c for c in prioritized if null_rate.get(c, 0) < 0.5]
+
+    # NEW: prioritize likely key components (generic)
+    prioritized = sorted(prioritized, key=key_component_score, reverse=True)
 
     def uniq_ratio(key_cols):
         return df.drop_duplicates(subset=key_cols).shape[0] / n
@@ -267,6 +231,21 @@ def guess_key_greedy_with_steps(df, max_cols=6):
         key.append(best_next)
         steps.append((key.copy(), best_ratio))
 
+    # If we didn't reach uniqueness, try one more discriminator column
+    if steps[-1][1] < 1.0:
+        best_next = None
+        best_ratio = steps[-1][1]
+        for c in discriminator_cols(df):
+            if c in key:
+                continue
+            r = uniq_ratio(key + [c])
+            if r > best_ratio:
+                best_ratio = r
+                best_next = c
+        if best_next:
+            key.append(best_next)
+            steps.append((key.copy(), best_ratio))
+
     return key, steps[-1][1], steps
 
 def profile_one_file(csv_path: Path, verbose_print: bool = True) -> dict:
@@ -290,8 +269,10 @@ def profile_one_file(csv_path: Path, verbose_print: bool = True) -> dict:
     if nrows and nrows > 1:
         #key_cols, best_ratio = guess_key_greedy(df, max_cols=6)
         key_cols, ratio, steps = guess_key_greedy_with_steps(df, max_cols=6)
+        print(f"\nSTEPS for {csv_path.name}:")
         for cols, r in steps:
             print(f"{cols} -> {r:.6f}")
+        print(f"FINAL KEY: {key_cols}")
 
         dupes = df.duplicated(subset=key_cols).sum()
         unique_rows = df.drop_duplicates(subset=key_cols).shape[0]
