@@ -8,42 +8,56 @@ def read_csv_safely(
     parse_workdate: bool = False,
     workdate_col: str = "WorkDate",
     workdate_format: str = "%Y%m%d",
+    verbose: bool = False,
     **kwargs
 ) -> pd.DataFrame:
-    # default dtypes we want everywhere
+    # Default dtypes we want everywhere (when the column exists)
     default_dtype = {"PROVNUM": "string"}
 
-    # allow caller to add/override dtypes
+    # Merge any caller-provided dtype overrides
     caller_dtype = kwargs.pop("dtype", None)
     if caller_dtype:
         default_dtype.update(caller_dtype)
 
-    # optionally set up datetime parsing for WorkDate
-    if parse_workdate:
+    # Read header only to determine columns + correct encoding (cheap)
+    try:
+        cols = pd.read_csv(path, encoding="utf-8", nrows=0).columns
+        chosen_encoding = "utf-8"
+    except UnicodeDecodeError:
+        cols = pd.read_csv(path, encoding="cp1252", nrows=0).columns
+        chosen_encoding = "cp1252"
+
+    # Filter dtype mapping to only columns that actually exist in this file
+    dtype_filtered = {col: type for col, type in default_dtype.items() if col in cols}
+
+    # Optional: parse WorkDate on ingest (only if column exists)
+    if parse_workdate and workdate_col in cols:
         caller_parse_dates = kwargs.pop("parse_dates", None)
 
-        # merge with any user-supplied parse_dates
         if caller_parse_dates is None:
             parse_dates = [workdate_col]
         else:
-            # normalize to list
-            if isinstance(caller_parse_dates, (str,)):
-                parse_dates = [caller_parse_dates]
-            else:
-                parse_dates = list(caller_parse_dates)
+            parse_dates = [caller_parse_dates] if isinstance(caller_parse_dates, str) else list(caller_parse_dates)
             if workdate_col not in parse_dates:
                 parse_dates.append(workdate_col)
 
         kwargs["parse_dates"] = parse_dates
         kwargs["date_format"] = workdate_format
 
-    def _read(encoding: str) -> pd.DataFrame:
-        return pd.read_csv(path, encoding=encoding, dtype=default_dtype, **kwargs)
+    if verbose:
+        print(f"[read_csv_safely] file={path}")
+        print(f"[read_csv_safely] encoding={chosen_encoding}")
+        print(f"[read_csv_safely] columns={len(cols)}")
+        if dtype_filtered:
+            print(f"[read_csv_safely] dtype_applied={dtype_filtered}")
+        else:
+            print(f"[read_csv_safely] dtype_applied={{}}")
+        if parse_workdate and workdate_col in cols:
+            print(f"[read_csv_safely] parse_dates={kwargs.get('parse_dates')}, date_format={kwargs.get('date_format')}")
+        elif parse_workdate:
+            print(f"[read_csv_safely] parse_workdate=True but '{workdate_col}' not found; skipping date parsing")
 
-    try:
-        return _read("utf-8")
-    except UnicodeDecodeError:
-        return _read("cp1252")
+    return pd.read_csv(path, encoding=chosen_encoding, dtype=dtype_filtered, **kwargs)
 
 def coerce_workdate(df: pd.DataFrame, col="WorkDate") -> pd.DataFrame:
     df[col] = pd.to_datetime(df[col].astype(str), format="%Y%m%d", errors="raise")
@@ -53,7 +67,7 @@ def show_schema(df):
     return df.dtypes.reset_index().rename(columns={"index": "column", 0: "dtype"})
 
 file_name = "PBJ_Daily_Nurse_Staffing_Q2_2024.csv"
-df = read_csv_safely(file_name, parse_workdate=True)
+df = read_csv_safely("PBJ_Daily_Nurse_Staffing_Q2_2024.csv", parse_workdate=True, verbose=True)
 #df = coerce_workdate(df)
 
 # print("Pandas version: " + pd.__version__)
