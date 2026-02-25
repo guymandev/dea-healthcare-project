@@ -1,6 +1,7 @@
 import pandas as pd
 import gdown
 import sys
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -364,6 +365,57 @@ def profile_all_data_files(data_dir: str = "./data", reports_dir: str = "./repor
     summary_csv = out_path / f"data_profile_summary_{ts}.csv"
     summary_df.to_csv(summary_csv, index=False)
     print(f"\n✅ Wrote summary report to: {summary_csv.resolve()}")
+
+    #Begin generating suggested join mappings
+    def _split_key(best_key_guess: str, max_cols: int = 6):
+        if not best_key_guess or best_key_guess.startswith("("):
+            return [""] * max_cols
+        parts = [p.strip() for p in best_key_guess.split("|")]
+        parts = parts[:max_cols] + [""] * (max_cols - len(parts))
+        return parts
+
+    def _guess_hub_key(cols):
+        """Pick the most likely join hub key from the key columns."""
+        joined = " ".join(c.lower() for c in cols if c)
+        # prioritize common healthcare identifiers
+        for pattern in [
+            "cms certification number", "(ccn)", "ccn",
+            "provnum", "provnum", "provider id", "npi", "fips"
+        ]:
+            for c in cols:
+                if c and pattern in c.lower():
+                    return c
+        return cols[0] if cols and cols[0] else ""
+
+    def _guess_date_key(cols):
+        for c in cols:
+            if not c:
+                continue
+            cl = c.lower()
+            if any(k in cl for k in ["date", "dt", "time", "timestamp", "from", "through", "start", "end"]):
+                return c
+        return ""
+
+    # ---- build join-key report ----
+    max_key_cols = 6
+    split_cols = summary_df["best_key_guess"].apply(lambda s: _split_key(s, max_key_cols))
+    split_df = pd.DataFrame(split_cols.tolist(), columns=[f"key_col_{i}" for i in range(1, max_key_cols + 1)])
+
+    join_df = pd.concat(
+        [summary_df[["file", "rows", "cols", "best_key_guess", "best_key_dupes", "best_key_uniqueness_ratio"]], split_df],
+        axis=1
+    )
+
+    join_df["hub_key"] = join_df[[f"key_col_{i}" for i in range(1, max_key_cols + 1)]].apply(
+        lambda r: _guess_hub_key(list(r.values)), axis=1
+    )
+    join_df["date_key"] = join_df[[f"key_col_{i}" for i in range(1, max_key_cols + 1)]].apply(
+        lambda r: _guess_date_key(list(r.values)), axis=1
+    )
+
+    join_csv = out_path / f"join_key_candidates_{ts}.csv"
+    join_df.to_csv(join_csv, index=False)
+    print(f"✅ Wrote join-key report to: {join_csv.resolve()}")
 
 #Output full log output into a report
 reports_dir = Path("./reports")
