@@ -2,6 +2,7 @@
 *.csv
 *.db
 data/
+reports/
 
 # python
 __pycache__/

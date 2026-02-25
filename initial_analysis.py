@@ -1,5 +1,21 @@
 import pandas as pd
 import gdown
+import sys
+from pathlib import Path
+from datetime import datetime
+
+# Class that will be used to duplicate output to both terminal and a log file.
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 # This function deals with different encoding, defaults PROVNUM to String, and coerces WorkDate to datetime. 
 # It also has flexibility to perform the same coersion on other date fields that are passed into the **kwargs
@@ -12,7 +28,12 @@ def read_csv_safely(
     verbose: bool = False,
     **kwargs
 ) -> pd.DataFrame:
-    default_dtype = {"PROVNUM": "string"}
+    default_dtype = {
+        "PROVNUM": "string",
+        "CMS Certification Number (CCN)": "string",
+        "CMS Certification Number": "string",
+        "CCN": "string",
+    }
 
     caller_dtype = kwargs.pop("dtype", None)
     if caller_dtype:
@@ -62,8 +83,8 @@ def coerce_workdate(df: pd.DataFrame, col="WorkDate") -> pd.DataFrame:
 def show_schema(df):
     return df.dtypes.reset_index().rename(columns={"index": "column", 0: "dtype"})
 
-file_name = "./data/PBJ_Daily_Nurse_Staffing_Q2_2024.csv"
-df = read_csv_safely("PBJ_Daily_Nurse_Staffing_Q2_2024.csv", parse_workdate=True, verbose=True)
+# file_name = "./data/PBJ_Daily_Nurse_Staffing_Q2_2024.csv"
+# df = read_csv_safely("PBJ_Daily_Nurse_Staffing_Q2_2024.csv", parse_workdate=True, verbose=True)
 #df = coerce_workdate(df)
 
 # print("Pandas version: " + pd.__version__)
@@ -72,12 +93,322 @@ df = read_csv_safely("PBJ_Daily_Nurse_Staffing_Q2_2024.csv", parse_workdate=True
 # Intial examination
 #########################
 
+#Check if data folder exists. If not, then download files. 
+folder_path = Path("./data/")
+if not folder_path.is_dir():
+    folder_url = "https://drive.google.com/drive/folders/15KqJ1MZ7JcgAkOfqcaWcALWkG0dh3jpE"
+    gdown.download_folder(folder_url, output="data", quiet=False, use_cookies=False)
 
-folder_url = "https://drive.google.com/drive/folders/15KqJ1MZ7JcgAkOfqcaWcALWkG0dh3jpE"
-gdown.download_folder(folder_url, output="data", quiet=False, use_cookies=False)
+#Helper functions
+def is_dateish_col(col: str) -> bool:
+    c = col.lower()
+    return any(k in c for k in [
+        "date", "dt", "time", "timestamp",
+        "qtr", "quarter", "year",
+        "period", "processing", "survey", "correction", "association",
+        "start", "end", "from", "through", "thru"
+    ])
 
-print(df.shape)
-print(show_schema(df).to_string(index=False))
+def is_idish_col(col: str) -> bool:
+    c = col.lower()
+    return any(k in c for k in [
+        "id", "num", "key", "prov", "provider", "facility", "ccn", "npi", "fips",
+        # event identifiers
+        "measure", "code", "tag", "prefix", "category", "cycle", "type", "role"
+    ])
+
+BAD_KEYWORDS = [
+    "provider name", "name", "address", "location", "description", "comment", "text",
+    "telephone", "phone"
+    # keep city/zip/county as "usually not keys"
+    "city", "zip", "county"
+]
+
+def looks_like_bad_key(col: str) -> bool:
+    c = col.lower()
+    return any(k in c for k in BAD_KEYWORDS)
+
+# Initial function to guess composite keys
+def guess_composite_keys(df: pd.DataFrame, max_candidates: int = 3):
+    """
+    Returns a list of candidate key column lists, e.g.:
+      [['PROVNUM', 'WorkDate'], ['PROVNUM', 'WorkDate', 'CY_Qtr'], ...]
+    """
+    cols = list(df.columns)
+
+    id_cols = [c for c in cols if is_idish_col(c)]
+    date_cols = [c for c in cols if is_dateish_col(c)]
+
+    # fallback if heuristics find nothing
+    if not id_cols:
+        id_cols = cols[:5]
+    if not date_cols:
+        date_cols = []
+
+    # rank by uniqueness ratio (higher is more key-like)
+    n = len(df)
+    def uniq_ratio(c):
+        try:
+            return df[c].nunique(dropna=True) / n if n else 0
+        except Exception:
+            return 0
+
+    id_cols = sorted(id_cols, key=uniq_ratio, reverse=True)[:max_candidates]
+    date_cols = sorted(date_cols, key=uniq_ratio, reverse=True)[:max_candidates]
+
+    candidates = []
+
+    # single-column candidates (rarely true PK, but good signal)
+    for c in id_cols[:2]:
+        candidates.append([c])
+
+    # pair candidates: (best id, best date)
+    if id_cols and date_cols:
+        candidates.append([id_cols[0], date_cols[0]])
+
+    # triple candidate: (best id, best date, another id-like if available)
+    if len(id_cols) >= 2 and date_cols:
+        candidates.append([id_cols[0], date_cols[0], id_cols[1]])
+
+    # de-dupe while preserving order
+    seen = set()
+    uniq = []
+    for cand in candidates:
+        key = tuple(cand)
+        if key not in seen and all(col in df.columns for col in cand):
+            seen.add(key)
+            uniq.append(cand)
+
+    return uniq
+
+# Improved function to guess primary keys
+def guess_key_greedy(df, max_cols=4):
+    n = len(df)
+    if n == 0:
+        return []
+
+    # candidate columns: exclude obvious descriptive stuff
+    cols = [c for c in df.columns if not looks_like_bad_key(c)]
+
+    # prioritize id/date-ish cols first; then allow others
+    prioritized = [c for c in cols if is_idish_col(c) or is_dateish_col(c)]
+    if not prioritized:
+        prioritized = cols
+
+    # ignore columns with lots of nulls (often not key components)
+    null_rate = df.isna().mean()
+    prioritized = [c for c in prioritized if null_rate.get(c, 0) < 0.5]
+
+    # helper: uniqueness ratio for a set of columns
+    def uniq_ratio(key_cols):
+        return df.drop_duplicates(subset=key_cols).shape[0] / n
+
+    # start with the best single column
+    best = max(prioritized, key=lambda c: uniq_ratio([c]))
+    key = [best]
+    best_ratio = uniq_ratio(key)
+
+    # greedily add columns that improve uniqueness most
+    while best_ratio < 1.0 and len(key) < max_cols:
+        improvements = []
+        for c in prioritized:
+            if c in key:
+                continue
+            r = uniq_ratio(key + [c])
+            improvements.append((r, c))
+
+        improvements.sort(reverse=True)
+        if not improvements:
+            break
+
+        next_ratio, next_col = improvements[0]
+        if next_ratio <= best_ratio:  # no improvement
+            break
+
+        key.append(next_col)
+        best_ratio = next_ratio
+
+    return key, best_ratio
+
+# Even further improved function to guess key fields
+def guess_key_greedy_with_steps(df, max_cols=6):
+    n = len(df)
+    if n == 0:
+        return [], None, []
+
+    cols = [c for c in df.columns if not looks_like_bad_key(c)]
+    prioritized = [c for c in cols if is_idish_col(c) or is_dateish_col(c)] or cols
+
+    null_rate = df.isna().mean()
+    prioritized = [c for c in prioritized if null_rate.get(c, 0) < 0.5]
+
+    def uniq_ratio(key_cols):
+        return df.drop_duplicates(subset=key_cols).shape[0] / n
+
+    best = max(prioritized, key=lambda c: uniq_ratio([c]))
+    key = [best]
+    steps = [(key.copy(), uniq_ratio(key))]
+
+    while steps[-1][1] < 1.0 and len(key) < max_cols:
+        best_next = None
+        best_ratio = steps[-1][1]
+
+        for c in prioritized:
+            if c in key:
+                continue
+            r = uniq_ratio(key + [c])
+            if r > best_ratio:
+                best_ratio = r
+                best_next = c
+
+        if not best_next:
+            break
+
+        key.append(best_next)
+        steps.append((key.copy(), best_ratio))
+
+    return key, steps[-1][1], steps
+
+def profile_one_file(csv_path: Path, verbose_print: bool = True) -> dict:
+    # parse WorkDate if present
+    df = read_csv_safely(csv_path, parse_workdate=True, verbose=False)
+
+    nrows, ncols = df.shape
+
+    # schema + missingness
+    schema_df = show_schema(df)
+    null_pct = (df.isna().mean() * 100).sort_values(ascending=False)
+    top_nulls = null_pct.head(10).to_dict()
+
+    # cardinality (top 10 only)
+    nunique_series = df.nunique(dropna=True).sort_values(ascending=False)
+    top_cardinality = nunique_series.head(10).to_dict()
+
+    # key guessing + duplicate tests
+    key_results = []
+
+    if nrows and nrows > 1:
+        #key_cols, best_ratio = guess_key_greedy(df, max_cols=6)
+        key_cols, ratio, steps = guess_key_greedy_with_steps(df, max_cols=6)
+        for cols, r in steps:
+            print(f"{cols} -> {r:.6f}")
+
+        dupes = df.duplicated(subset=key_cols).sum()
+        unique_rows = df.drop_duplicates(subset=key_cols).shape[0]
+
+        key_results.append({
+            "candidate_key": "|".join(key_cols),
+            "dupes": int(dupes),
+            "unique_rows": int(unique_rows),
+            "row_count": int(nrows),
+            "uniqueness_ratio": round(unique_rows / nrows, 6) if nrows else None
+        })
+    else:
+        # 0 or 1 row: key detection isn't meaningful
+        key_results.append({
+            "candidate_key": "(n/a - <=1 row)",
+            "dupes": 0,
+            "unique_rows": int(nrows),
+            "row_count": int(nrows),
+            "uniqueness_ratio": 1.0 if nrows == 1 else None
+        })
+
+    if verbose_print:
+        print("\n" + "=" * 80)
+        print(f"FILE: {csv_path.name}")
+        print(f"SHAPE: {nrows:,} rows x {ncols} cols\n")
+
+        print("SCHEMA (col, dtype):")
+        print(schema_df.to_string(index=False))
+
+        print("\nTOP NULL % (up to 10):")
+        print(null_pct.head(10).round(3).to_string())
+
+        print("\nTOP CARDINALITY (nunique, up to 10):")
+        print(nunique_series.head(10).to_string())
+
+        print("\nKEY CANDIDATES:")
+        for r in key_results:
+            print(f"  - {r['candidate_key']}: dupes={r['dupes']}, "
+                  f"unique_rows={r['unique_rows']}, ratio={r['uniqueness_ratio']}")
+
+    # return a compact summary row (for the report)
+    best_key = None
+    if key_results:
+        # prefer highest uniqueness_ratio, then lowest dupes
+        best_key = sorted(key_results, key=lambda r: (-r["uniqueness_ratio"], r["dupes"]))[0]
+
+    return {
+        "file": csv_path.name,
+        "rows": int(nrows),
+        "cols": int(ncols),
+        "top_null_cols": "; ".join([f"{k}={v:.2f}%" for k, v in list(top_nulls.items())[:5]]),
+        "top_cardinality_cols": "; ".join([f"{k}={int(v)}" for k, v in list(top_cardinality.items())[:5]]),
+        "best_key_guess": best_key["candidate_key"] if best_key else "",
+        "best_key_dupes": best_key["dupes"] if best_key else None,
+        "best_key_uniqueness_ratio": best_key["uniqueness_ratio"] if best_key else None,
+    }
+
+def profile_all_data_files(data_dir: str = "./data", reports_dir: str = "./reports"):
+    data_path = Path(data_dir)
+    out_path = Path(reports_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    csv_files = sorted([p for p in data_path.iterdir() if p.is_file() and p.suffix.lower() == ".csv"])
+
+    summary_rows = []
+    for csv_path in csv_files:
+        try:
+            summary_rows.append(profile_one_file(csv_path, verbose_print=True))
+        except Exception as e:
+            print("\n" + "=" * 80)
+            print(f"FILE: {csv_path.name}")
+            print(f"ERROR: {type(e).__name__}: {e}")
+            summary_rows.append({
+                "file": csv_path.name,
+                "rows": None,
+                "cols": None,
+                "top_null_cols": "",
+                "top_cardinality_cols": "",
+                "best_key_guess": "",
+                "best_key_dupes": None,
+                "best_key_uniqueness_ratio": None,
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    summary_df = pd.DataFrame(summary_rows)
+
+    #Output summary report
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_csv = out_path / f"data_profile_summary_{ts}.csv"
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"\n✅ Wrote summary report to: {summary_csv.resolve()}")
+
+#Output full log output into a report
+reports_dir = Path("./reports")
+reports_dir.mkdir(parents=True, exist_ok=True)
+
+ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_path = reports_dir / f"profile_run_{ts}.log"
+
+with open(log_path, "w", encoding="utf-8") as f:
+    original_stdout = sys.stdout
+    sys.stdout = Tee(original_stdout, f)
+    try:
+        profile_all_data_files()   # <-- your existing function that prints a lot
+    finally:
+        sys.stdout = original_stdout
+
+print(f"\n✅ Wrote full console log to: {log_path.resolve()}")
+
+
+
+# ---------- call it ----------
+#profile_all_data_files()
+
+
+# print(df.shape)
+# print(show_schema(df).to_string(index=False))
 
 # null_pct = (df.isna().mean() * 100).sort_values(ascending=False)
 # print(null_pct.head(20))
