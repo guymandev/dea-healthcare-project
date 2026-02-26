@@ -2,6 +2,7 @@
 *.csv
 *.db
 data/
+data2/
 reports/
 
 # python
