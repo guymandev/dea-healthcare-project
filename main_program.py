@@ -1,8 +1,9 @@
 import hashlib
 import json
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Dict, Any, Optional
 
 import boto3
 import gdown
@@ -11,25 +12,62 @@ import gdown
 # ---------------------------
 # Config
 # ---------------------------
-BUCKET = "healthcare-data-lake-gj"
-DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/15KqJ1MZ7JcgAkOfqcaWcALWkG0dh3jpE"
-LOCAL_DOWNLOAD_DIR = Path("./data_download")
-INGEST_DT = date.today().isoformat()  # e.g. 2026-03-07
+BUCKET = os.environ.get("HEALTHCARE_BUCKET", "healthcare-data-lake-gj")
+
+DRIVE_FOLDER_URL = os.environ.get(
+    "DRIVE_FOLDER_URL",
+    "https://drive.google.com/drive/folders/15KqJ1MZ7JcgAkOfqcaWcALWkG0dh3jpE",
+)
+
+# PBJ staffing file is a standalone Drive file
+PBJ_FILE_ID = os.environ.get("PBJ_FILE_ID", "1kZMZFGfTLdcwmdhjDPZh2-XE2_gOBRCz")
+PBJ_FILENAME = os.environ.get("PBJ_FILENAME", "PBJ_Daily_Nurse_Staffing_Q2_2024.csv")
+
+RAW_PREFIX = os.environ.get("RAW_PREFIX", "raw")
+CONTROL_PREFIX = os.environ.get("CONTROL_PREFIX", "control")
+QUARANTINE_PREFIX = os.environ.get("QUARANTINE_PREFIX", "quarantine")
+
+LATEST_MANIFEST_KEY = f"{CONTROL_PREFIX}/manifests/latest/manifest.json"
+
+TMP_DIR = Path("/tmp/data_download") if "AWS_LAMBDA_FUNCTION_NAME" in os.environ else Path("./data_download")
 
 
 # ---------------------------
-# Helpers
+# S3 helpers
 # ---------------------------
-def dataset_key_from_filename(filename: str) -> str:
-    """
-    Turn a filename into a stable dataset prefix.
-    Keep it simple and deterministic.
-    """
-    base = filename.lower().replace(".csv", "").replace(".json", "")
-    base = base.replace("__", "_").replace(" ", "_")
-    # Optional: normalize known patterns
-    base = base.replace("nh_", "nh_")
-    return base
+def s3_client():
+    return boto3.client("s3")
+
+
+def s3_get_json(bucket: str, key: str) -> Optional[Dict[str, Any]]:
+    s3 = s3_client()
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj["Body"].read().decode("utf-8"))
+    except s3.exceptions.NoSuchKey:
+        return None
+
+
+def s3_put_json(bucket: str, key: str, payload: Dict[str, Any]) -> None:
+    s3 = s3_client()
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def s3_upload_file(local_path: Path, bucket: str, key: str) -> None:
+    s3 = s3_client()
+    s3.upload_file(Filename=str(local_path), Bucket=bucket, Key=key)
+
+
+# ---------------------------
+# Local helpers
+# ---------------------------
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def sha256_file(path: Path) -> str:
@@ -40,83 +78,142 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def upload_to_s3(s3_client, local_path: Path, bucket: str, key: str) -> None:
-    """
-    Upload file to S3 at s3://bucket/key
-    """
-    s3_client.upload_file(
-        Filename=str(local_path),
-        Bucket=bucket,
-        Key=key,
-    )
+def dataset_key_from_filename(filename: str) -> str:
+    base = filename.lower()
+    for ext in (".csv", ".json"):
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+    return base.replace(" ", "_").replace("__", "_")
+
+
+def iter_data_files(root: Path):
+    # recursively find CSV/JSON, skip PDFs
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in {".csv", ".json"}:
+            yield p
 
 
 # ---------------------------
-# Main ingestion flow
+# Download helpers
 # ---------------------------
-def main():
-    LOCAL_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+def download_drive_folder(output_dir: Path) -> None:
+    ensure_dir(output_dir)
+    gdown.download_folder(DRIVE_FOLDER_URL, output=str(output_dir), quiet=False, use_cookies=False)
 
-    # 1) Download files from Drive folder into LOCAL_DOWNLOAD_DIR
-    # NOTE: use_cookies=False works if folder is public/anyone-with-link.
-    gdown.download_folder(
-        DRIVE_FOLDER_URL,
-        output=str(LOCAL_DOWNLOAD_DIR),
-        quiet=False,
-        use_cookies=False,
-    )
 
-    s3 = boto3.client("s3")
+def download_pbj_file(output_dir: Path) -> Path:
+    ensure_dir(output_dir)
+    out_path = output_dir / PBJ_FILENAME
+    url = f"https://drive.google.com/uc?id={PBJ_FILE_ID}"
+    gdown.download(url, str(out_path), quiet=False)
+    return out_path
 
-    manifest = {
-        "ingest_dt": INGEST_DT,
-        "source": "google_drive",
-        "files": [],
+
+# ---------------------------
+# Ingest
+# ---------------------------
+def ingest_once() -> Dict[str, Any]:
+    ingest_dt = date.today().isoformat()
+    run_ts = datetime.now(timezone.utc).isoformat()
+
+    ensure_dir(TMP_DIR)
+
+    # Load prior manifest checksums
+    prior = s3_get_json(BUCKET, LATEST_MANIFEST_KEY) or {}
+    prior_checksums = {
+        f.get("filename"): f.get("sha256")
+        for f in prior.get("files", [])
+        if f.get("filename") and f.get("sha256")
     }
 
-    # 2) Upload each CSV to S3 RAW with the desired key (prefix)
-    for file_path in sorted(LOCAL_DOWNLOAD_DIR.glob("*")):
-        if not file_path.is_file():
-            continue
+    manifest: Dict[str, Any] = {
+        "ingest_dt": ingest_dt,
+        "run_ts_utc": run_ts,
+        "source": "google_drive_public",
+        "bucket": BUCKET,
+        "raw_prefix": RAW_PREFIX,
+        "files": [],
+        "skipped_unchanged": [],
+        "errors": [],
+    }
 
-        # Skip non-data artifacts (like PDFs)
-        if file_path.suffix.lower() not in {".csv", ".json"}:
-            continue
+    # 1) Download folder contents
+    folder_dir = TMP_DIR / "folder"
+    download_drive_folder(folder_dir)
 
+    # 2) Download PBJ standalone file
+    pbj_dir = TMP_DIR / "pbj"
+    download_pbj_file(pbj_dir)
+
+    # 3) Process all downloaded data files
+    all_files = list(iter_data_files(folder_dir)) + list(iter_data_files(pbj_dir))
+    print(f"Downloaded data files: {len(all_files)}")
+    print([p.name for p in all_files[:5]])
+
+    for file_path in all_files:
         filename = file_path.name
         dataset_key = dataset_key_from_filename(filename)
 
-        s3_key = f"raw/{dataset_key}/ingest_dt={INGEST_DT}/{filename}"
+        try:
+            checksum = sha256_file(file_path)
+            size_bytes = file_path.stat().st_size
 
-        checksum = sha256_file(file_path)
-        size_bytes = file_path.stat().st_size
+            if prior_checksums.get(filename) == checksum:
+                manifest["skipped_unchanged"].append(
+                    {"filename": filename, "sha256": checksum, "size_bytes": size_bytes}
+                )
+                file_path.unlink(missing_ok=True)
+                continue
 
-        print(f"Uploading {filename} -> s3://{BUCKET}/{s3_key}")
-        upload_to_s3(s3, file_path, BUCKET, s3_key)
+            s3_key = f"{RAW_PREFIX}/{dataset_key}/ingest_dt={ingest_dt}/{filename}"
+            s3_upload_file(file_path, BUCKET, s3_key)
 
-        manifest["files"].append(
-            {
-                "filename": filename,
-                "dataset_key": dataset_key,
-                "s3_key": s3_key,
-                "size_bytes": size_bytes,
-                "sha256": checksum,
-            }
-        )
+            manifest["files"].append(
+                {
+                    "filename": filename,
+                    "dataset_key": dataset_key,
+                    "s3_key": s3_key,
+                    "size_bytes": size_bytes,
+                    "sha256": checksum,
+                }
+            )
 
-    # 3) Upload manifest to S3 control/
-    manifest_key = f"control/manifests/ingest_dt={INGEST_DT}/manifest.json"
-    print(f"Uploading manifest -> s3://{BUCKET}/{manifest_key}")
+        except Exception as e:
+            # quarantine on error
+            try:
+                err_key = f"{QUARANTINE_PREFIX}/{dataset_key}/ingest_dt={ingest_dt}/{filename}"
+                s3_upload_file(file_path, BUCKET, err_key)
+            except Exception:
+                pass
 
-    s3.put_object(
-        Bucket=BUCKET,
-        Key=manifest_key,
-        Body=json.dumps(manifest, indent=2).encode("utf-8"),
-        ContentType="application/json",
-    )
+            manifest["errors"].append({"filename": filename, "dataset_key": dataset_key, "error": repr(e)})
 
-    print("Done.")
+        finally:
+            # cleanup local file
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception:
+                pass
+
+    # 4) Write manifests
+    archive_key = f"{CONTROL_PREFIX}/manifests/ingest_dt={ingest_dt}/manifest.json"
+    s3_put_json(BUCKET, archive_key, manifest)
+    s3_put_json(BUCKET, LATEST_MANIFEST_KEY, manifest)
+
+    return {
+        "status": "ok" if not manifest["errors"] else "partial_failure",
+        "uploaded": len(manifest["files"]),
+        "skipped_unchanged": len(manifest["skipped_unchanged"]),
+        "errors": len(manifest["errors"]),
+        "archive_manifest_s3_key": archive_key,
+        "latest_manifest_s3_key": LATEST_MANIFEST_KEY,
+    }
+
+
+def handler(event, context):
+    return ingest_once()
 
 
 if __name__ == "__main__":
-    main()
+    print(json.dumps(ingest_once(), indent=2))
