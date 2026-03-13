@@ -53,7 +53,7 @@ def s3_put_json(bucket: str, key: str, payload: Dict[str, Any]) -> None:
     s3.put_object(
         Bucket=bucket,
         Key=key,
-        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        Body=json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
         ContentType="application/json",
     )
 
