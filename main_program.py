@@ -118,8 +118,17 @@ def ingest_once() -> Dict[str, Any]:
 
     ensure_dir(TMP_DIR)
 
+    # Debug check of manifest
+    print("BUCKET =", BUCKET)
+    print("LATEST_MANIFEST_KEY =", LATEST_MANIFEST_KEY)
+    print("AWS_PROFILE =", os.environ.get("AWS_PROFILE"))
+
     # Load prior manifest checksums
     prior = s3_get_json(BUCKET, LATEST_MANIFEST_KEY) or {}
+    # More debug
+    print("prior loaded? ", prior is not None)
+    print("prior files count: ", 0 if not prior else len(prior.get("files",[])))
+
     prior_checksums = {
         f.get("filename"): f.get("sha256")
         for f in prior.get("files", [])
@@ -157,6 +166,12 @@ def ingest_once() -> Dict[str, Any]:
         try:
             checksum = sha256_file(file_path)
             size_bytes = file_path.stat().st_size
+
+            # Still more debugging
+            if filename in prior_checksums:
+                print("COMPARE", filename, "prior:", prior_checksums[filename], "new:", checksum)
+            else:
+                print("NO PRIOR ENTRY FOR", filename)
 
             if prior_checksums.get(filename) == checksum:
                 manifest["skipped_unchanged"].append(
