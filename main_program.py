@@ -139,6 +139,45 @@ def s3_upload_file(local_path: Path, bucket: str, key: str) -> None:
     s3 = s3_client()
     s3.upload_file(Filename=str(local_path), Bucket=bucket, Key=key)
 
+# ---------------------------
+# Text file helpers for creating JSONL manifest
+# ---------------------------
+def s3_put_text(bucket: str, key: str, text: str, content_type: str = "text/plain") -> None:
+    s3 = s3_client()
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=text.encode("utf-8"),
+        ContentType=content_type,
+    )
+
+def manifest_files_to_jsonl(latest_manifest: Dict[str, Any]) -> str:
+    """
+    Emit one JSON object per line, one per file entry in latest_manifest['files'].
+    Each line also includes ingest_dt and run_ts_utc for easy querying.
+    """
+    ingest_dt = latest_manifest.get("ingest_dt")
+    run_ts_utc = latest_manifest.get("run_ts_utc")
+
+    lines = []
+    for f in latest_manifest.get("files", []):
+        row = {
+            "ingest_dt": ingest_dt,
+            "run_ts_utc": run_ts_utc,
+            # the rest is the file entry
+            **f,
+        }
+        lines.append(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+# Utility function to execute a one-off write of the JSONL file
+# without needing to rerun the entire ingest.
+def write_latest_files_jsonl_only() -> None:
+    latest = s3_get_json(BUCKET, LATEST_MANIFEST_KEY) or {}
+    jsonl_text = manifest_files_to_jsonl(latest)
+    key = f"{CONTROL_PREFIX}/manifests/latest/files.jsonl"
+    s3_put_text(BUCKET, key, jsonl_text, content_type="application/x-ndjson")
+    print("Wrote:", key)
 
 # ---------------------------
 # Local helpers
@@ -414,7 +453,18 @@ def ingest_once() -> Dict[str, Any]:
     # Optional: keep a convenience list too (harmless)
     latest_manifest["all_files"] = latest_manifest["files"]
 
+    # Write latest manifest JSON
     s3_put_json(BUCKET, LATEST_MANIFEST_KEY, latest_manifest)
+
+    # 5) Also write JSONL "latest files" view for Athena
+    LATEST_FILES_JSONL_KEY = f"{CONTROL_PREFIX}/manifests/latest/files.jsonl"
+    jsonl_text = manifest_files_to_jsonl(latest_manifest)  # uses latest_manifest["files"]
+    s3_put_text(
+        BUCKET,
+        LATEST_FILES_JSONL_KEY,
+        jsonl_text,
+        content_type="application/x-ndjson"
+    )
 
     return {
         "status": "ok" if not manifest["errors"] else "partial_failure",
@@ -432,3 +482,4 @@ def handler(event, context):
 
 if __name__ == "__main__":
     print(json.dumps(ingest_once(), indent=2))
+    # write_latest_files_jsonl_only()
