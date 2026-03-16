@@ -175,7 +175,7 @@ def manifest_files_to_jsonl(latest_manifest: Dict[str, Any]) -> str:
 def write_latest_files_jsonl_only() -> None:
     latest = s3_get_json(BUCKET, LATEST_MANIFEST_KEY) or {}
     jsonl_text = manifest_files_to_jsonl(latest)
-    key = f"{CONTROL_PREFIX}/manifests/latest/files.jsonl"
+    key = f"{CONTROL_PREFIX}/manifests/latest_files/files.jsonl"
     s3_put_text(BUCKET, key, jsonl_text, content_type="application/x-ndjson")
     print("Wrote:", key)
 
@@ -457,7 +457,7 @@ def ingest_once() -> Dict[str, Any]:
     s3_put_json(BUCKET, LATEST_MANIFEST_KEY, latest_manifest)
 
     # 5) Also write JSONL "latest files" view for Athena
-    LATEST_FILES_JSONL_KEY = f"{CONTROL_PREFIX}/manifests/latest/files.jsonl"
+    LATEST_FILES_JSONL_KEY = f"{CONTROL_PREFIX}/manifests/latest_files/files.jsonl"
     jsonl_text = manifest_files_to_jsonl(latest_manifest)  # uses latest_manifest["files"]
     s3_put_text(
         BUCKET,
