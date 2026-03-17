@@ -1,3 +1,7 @@
+-- S3_PREFIX: s3://healthcare-data-lake-gj/curated/dim_facility/
+
+DROP TABLE IF EXISTS healthcare_curated_db.dim_facility;
+
 CREATE TABLE healthcare_curated_db.dim_facility
 WITH (
   format = 'PARQUET',

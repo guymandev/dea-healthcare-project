@@ -1,1 +1,0 @@
-DROP TABLE IF EXISTS healthcare_curated_db.dim_facility;
