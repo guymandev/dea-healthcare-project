@@ -29,34 +29,181 @@ class AthenaConfig:
 SQL_ROOT = Path("sql")
 ORDERED_DIRS = ["00_bootstrap", "10_fixed", "20_curated", "90_checks"]
 
+PROJECT_AWS_REGION = (
+    os.environ.get("PROJECT_AWS_REGION")
+    or os.environ.get("AWS_REGION")
+    or os.environ.get("AWS_DEFAULT_REGION")
+    or "us-east-1"
+)
+
+os.environ["AWS_REGION"] = PROJECT_AWS_REGION
+os.environ["AWS_DEFAULT_REGION"] = PROJECT_AWS_REGION
+PROJECT_AWS_PROFILE = os.environ.get("AWS_PROFILE", "healthcare-dev")
+
+# Mapping dictionary for dataset names to table names
+DATASET_KEY_TO_TABLE = {
+    "nh_providerinfo_oct2024": "raw_nh_providerinfo_oct2024",
+    "swing_bed_snf_data_oct2024": "raw_swing_bed_snf_data_oct2024",
+    "pbj_daily_nurse_staffing_q2_2024": "raw_pbj_daily_nurse_staffing_q2_2024",
+    "nh_qualitymsr_claims_oct2024": "raw_nh_qualitymsr_claims_oct2024",
+    "nh_qualitymsr_mds_oct2024": "raw_nh_qualitymsr_mds_oct2024",
+    "nh_ownership_oct2024": "raw_nh_ownership_oct2024",
+    "nh_penalties_oct2024": "raw_nh_penalties_oct2024",
+    "nh_surveydates_oct2024": "raw_nh_surveydates_oct2024",
+    "nh_surveysummary_oct2024": "raw_nh_surveysummary_oct2024",
+    "nh_firesafetycitations_oct2024": "raw_nh_firesafetycitations_oct2024",
+    "nh_healthcitations_oct2024": "raw_nh_healthcitations_oct2024",
+    "nh_covidvaxprovider_20241027": "raw_nh_covidvaxprovider_20241027",
+    "nh_covidvaxaverages_20241027": "raw_nh_covidvaxaverages_20241027",
+    "skilled_nursing_facility_quality_reporting_program_provider_data_oct2024": "raw_skilled_nursing_facility_quality_reporting_program_provider_data_oct2024",
+    "skilled_nursing_facility_quality_reporting_program_national_data_oct2024": "raw_skilled_nursing_facility_quality_reporting_program_national_data_oct2024",
+    "fy_2024_snf_vbp_aggregate_performance": "raw_fy_2024_snf_vbp_aggregate_performance",
+    "fy_2024_snf_vbp_facility_performance": "raw_fy_2024_snf_vbp_facility_performance",
+    "nh_stateusaverages_oct2024": "raw_nh_stateusaverages_oct2024",
+    "nh_datacollectionintervals_oct2024": "raw_nh_datacollectionintervals_oct2024",
+    "nh_hlthinspeccutpointsstate_oct2024": "raw_nh_hlthinspeccutpointsstate_oct2024",
+    "nh_citationdescriptions_oct2024": "raw_nh_citationdescriptions_oct2024",
+
+    # fixed tables
+    "raw_swing_bed_snf_data_oct2024_fixed": "raw_swing_bed_snf_data_oct2024_fixed",
+    "raw_nh_qualitymsr_claims_oct2024_fixed": "raw_nh_qualitymsr_claims_oct2024_fixed",
+    "raw_nh_qualitymsr_mds_oct2024_fixed": "raw_nh_qualitymsr_mds_oct2024_fixed",
+    "raw_nh_surveydates_oct2024_fixed": "raw_nh_surveydates_oct2024_fixed",
+    "raw_nh_firesafetycitations_oct2024_fixed": "raw_nh_firesafetycitations_oct2024_fixed",
+    "raw_nh_healthcitations_oct2024_fixed": "raw_nh_healthcitations_oct2024_fixed",
+    "raw_nh_ownership_oct2024_fixed": "raw_nh_ownership_oct2024_fixed",
+    "raw_nh_covidvaxprovider_20241027_fixed": "raw_nh_covidvaxprovider_20241027_fixed",
+    "raw_nh_covidvaxaverages_20241027_fixed": "raw_nh_covidvaxaverages_20241027_fixed",
+    "raw_nh_surveysummary_oct2024_fixed": "raw_nh_surveysummary_oct2024_fixed",
+    "raw_pbj_daily_nurse_staffing_q2_2024_fixed": "raw_pbj_daily_nurse_staffing_q2_2024_fixed",
+    "raw_snf_qrp_provider_data_oct2024_fixed": "raw_snf_qrp_provider_data_oct2024_fixed",
+}
 
 # ---------------------------
 # AWS clients
 # ---------------------------
 
+_session = None
+
+def aws_session():
+    global _session
+    if _session is None:
+        _session = boto3.Session(
+            profile_name=PROJECT_AWS_PROFILE,
+            region_name=aws_region()
+        )
+    return _session
+
 def aws_region() -> str:
-    region = (
-        os.environ.get("AWS_REGION")
-        or os.environ.get("AWS_DEFAULT_REGION")
-        or boto3.session.Session().region_name
-    )
-    if not region:
-        raise RuntimeError("No AWS region configured.")
-    return region
+    return PROJECT_AWS_REGION
+
+# def aws_region() -> str:
+#     region = (
+#         os.environ.get("AWS_REGION")
+#         or os.environ.get("AWS_DEFAULT_REGION")
+#         or boto3.session.Session().region_name
+#     )
+#     if not region:
+#         raise RuntimeError("No AWS region configured.")
+#     return region
 
 def athena_client():
-    return boto3.client("athena", region_name=aws_region())
+    return aws_session().client("athena")
 
 def glue_client():
-    return boto3.client("glue", region_name=aws_region())
+    return aws_session().client("glue")
+
+# ------------------------------------
+# Partition helper functions
+# ------------------------------------
+
+def partition_location_from_s3_key(s3_key: str) -> str:
+    """
+    Turn a manifest s3_key like:
+      raw/nh_providerinfo_oct2024/ingest_dt=2026-03-14/NH_ProviderInfo_Oct2024.csv
+    into:
+      s3://healthcare-data-lake-gj/raw/nh_providerinfo_oct2024/ingest_dt=2026-03-14/
+    """
+    parts = s3_key.split("/")
+    if len(parts) < 3:
+        raise ValueError(f"Unexpected s3_key shape: {s3_key}")
+
+    # drop filename
+    prefix_parts = parts[:-1]
+    return f"s3://healthcare-data-lake-gj/{'/'.join(prefix_parts)}/"
+
+def build_add_partition_sql(
+    *,
+    database_name: str,
+    table_name: str,
+    ingest_dt: str,
+    location: str,
+) -> str:
+    return f"""
+        ALTER TABLE {database_name}.{table_name}
+        ADD IF NOT EXISTS
+        PARTITION (ingest_dt='{ingest_dt}')
+        LOCATION '{location}'
+        """.strip()
+
+def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
+    """
+    Build ALTER TABLE ... ADD IF NOT EXISTS PARTITION statements
+    for Glue tables that are partitioned by ingest_dt and have manifest-backed files.
+    """
+    inventory = {
+        row["table_name"]: row
+        for row in list_tables_with_partitions("healthcare_catalog_db")
+        if row["partitioned_by_ingest_dt"]
+    }
+
+    manifest_rows = get_manifest_file_rows(cfg)
+
+    sql_statements: List[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for rec in manifest_rows:
+        s3_key = rec.get("s3_key", "")
+        dataset_key = rec.get("dataset_key", "")
+
+        if not s3_key or not dataset_key:
+            continue
+
+        # only create partitions for the actual uploaded/raw partition date
+        if f"ingest_dt={ingest_dt}" not in s3_key:
+            continue
+
+        table_name = DATASET_KEY_TO_TABLE.get(dataset_key)
+        if not table_name:
+            continue
+
+        if table_name not in inventory:
+            continue
+
+        key = (table_name, ingest_dt)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        location = partition_location_from_s3_key(s3_key)
+
+        sql_statements.append(
+            build_add_partition_sql(
+                database_name="healthcare_catalog_db",
+                table_name=table_name,
+                ingest_dt=ingest_dt,
+                location=location,
+            )
+        )
+
+    return sorted(sql_statements)
 
 # ---------------------------
-# S3 helpers for "aws rm" commands
+# S3 helpers (mainly for "aws rm" commands)
 # ---------------------------
 
 def s3_client():
-    return boto3.client("s3", region_name=aws_region())
-
+    return aws_session().client("s3")
 
 def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
     if not s3_uri.startswith("s3://"):
@@ -162,6 +309,68 @@ def run_sql_fetch_rows(sql: str, cfg: AthenaConfig) -> List[List[str]]:
             rows.append(vals)
     return rows
 
+# --------------------------------
+# Helpers for data validation checks
+# --------------------------------
+
+def parse_first_numeric_result(rows: List[List[str]]) -> int:
+    """
+    Athena returns header row first, then data rows.
+    Expect one numeric value in the first data row.
+    """
+    if len(rows) < 2 or len(rows[1]) < 1:
+        raise RuntimeError("Check query returned no data rows.")
+    
+    raw = rows[1][0].strip() if rows[1][0] is not None else ""
+    if raw == "":
+        raise RuntimeError("Check query returned blank result.")
+    
+    return int(raw)
+
+
+def expectation_from_filename(sql_file: Path) -> str:
+    name = sql_file.name.lower()
+
+    if name.endswith("_gt_zero.sql"):
+        return "gt_zero"
+    if name.endswith("_ge_one.sql"):
+        return "ge_one"
+    if name.endswith("_zero.sql"):
+        return "zero"
+
+    raise RuntimeError(
+        f"Could not determine check expectation from filename: {sql_file.name}. "
+        f"Use a suffix like _zero.sql, _gt_zero.sql, or _ge_one.sql."
+    )
+
+
+def run_check_sql(
+    sql: str,
+    cfg: AthenaConfig,
+    *,
+    expectation: str = "zero"
+) -> None:
+    rows = run_sql_fetch_rows(sql, cfg)
+    value = parse_first_numeric_result(rows)
+
+    print("Check query...")
+    print(sql)
+    print(f"     check result = {value}")
+
+    if expectation == "zero":
+        if value != 0:
+            raise RuntimeError(f"Validation failed: expected 0 but got {value}")
+
+    elif expectation == "gt_zero":
+        if value <= 0:
+            raise RuntimeError(f"Validation failed: expected > 0 but got {value}")
+
+    elif expectation == "ge_one":
+        if value < 1:
+            raise RuntimeError(f"Validation failed: expected >= 1 but got {value}")
+
+    else:
+        raise RuntimeError(f"Unknown check expectation: {expectation}")
 
 # ---------------------------
 # SQL file loading
@@ -203,8 +412,9 @@ def iter_sql_files() -> Iterable[Path]:
 
 def get_latest_ingest_dt_from_manifest(cfg: AthenaConfig) -> Optional[str]:
     sql = """
-    SELECT max(ingest_dt) AS ingest_dt
+    SELECT max(regexp_extract(s3_key, 'ingest_dt=([0-9]{4}-[0-9]{2}-[0-9]{2})', 1)) AS ingest_dt
     FROM healthcare_catalog_db.manifest_latest_files
+    WHERE s3_key IS NOT NULL
     """
     rows = run_sql_fetch_rows(sql, cfg)
 
@@ -217,6 +427,31 @@ def get_latest_ingest_dt_from_manifest(cfg: AthenaConfig) -> Optional[str]:
     ingest_dt = rows[1][0].strip() if rows[1] and rows[1][0] else None
     return ingest_dt or None
 
+def get_manifest_file_rows(cfg: AthenaConfig) -> List[Dict[str, str]]:
+    sql = """
+    SELECT
+      ingest_dt,
+      filename,
+      dataset_key,
+      s3_key
+    FROM healthcare_catalog_db.manifest_latest_files
+    WHERE s3_key IS NOT NULL
+    """
+    rows = run_sql_fetch_rows(sql, cfg)
+
+    if len(rows) < 2:
+        return []
+
+    header = rows[0]
+    out: List[Dict[str, str]] = []
+
+    for row in rows[1:]:
+        rec = {}
+        for i, col in enumerate(header):
+            rec[col] = row[i] if i < len(row) else ""
+        out.append(rec)
+
+    return out
 
 # ---------------------------
 # Glue inventory helpers
@@ -266,14 +501,29 @@ def print_inventory(database_name: str) -> None:
 # ---------------------------
 
 def main():
+
+    # Fail fast check. If region not correct, end program.
+    def validate_project_region() -> None:
+        if aws_region() != "us-east-1":
+            raise RuntimeError(
+                f"Project must run in us-east-1, but aws_region() resolved to {aws_region()}"
+            )
+
     cfg = AthenaConfig()
+
+    validate_project_region()
 
     print("ATHENA_WORKGROUP =", cfg.workgroup)
     print("ATHENA_OUTPUT_LOCATION =", cfg.output_location)
+    print("PROJECT_AWS_REGION =", PROJECT_AWS_REGION)
     print("AWS_REGION =", os.environ.get("AWS_REGION"))
+    print("PROJECT_AWS_PROFILE =", PROJECT_AWS_PROFILE)
     print("AWS_DEFAULT_REGION =", os.environ.get("AWS_DEFAULT_REGION"))
-    print("boto3 session region =", boto3.session.Session().region_name)
-    print("athena client region =", athena_client().meta.region_name)
+    print("boto3 session region =", aws_session().region_name)
+    
+    print("PROJECT_AWS_PROFILE =", PROJECT_AWS_PROFILE)
+    print("boto3 session profile =", aws_session().profile_name)
+    print("sts caller identity =", aws_session().client("sts").get_caller_identity()["Arn"])    
 
     ingest_dt = get_latest_ingest_dt_from_manifest(cfg) or os.environ.get("INGEST_DT")
     if not ingest_dt:
@@ -288,25 +538,44 @@ def main():
     print_inventory("healthcare_catalog_db")
     print_inventory("healthcare_curated_db")
 
+    # Add partitions for tables, prior to running CTAS in following loop
+    partition_sql = generate_partition_add_sql(cfg, ingest_dt)
+
+    print(f"\nAuto-generated partition SQL count: {len(partition_sql)}")
+    for stmt in partition_sql:
+        print("----- PARTITION SQL START -----")
+        print(stmt)
+        print("----- PARTITION SQL END -------")
+        run_sql(stmt, cfg)
+
     for sql_file in iter_sql_files():
         sql_text = sql_file.read_text(encoding="utf-8")
         statements = split_sql_statements(sql_text)
         s3_prefix = extract_s3_prefix(sql_text)
 
         print(f"\n==> Running {sql_file} ({len(statements)} stmt)")
+        is_check_file = "90_checks" in str(sql_file)
+
         for i, stmt in enumerate(statements, 1):
             stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
             print(f"  -> stmt {i}/{len(statements)}")
             print("----- SQL START -----")
             print(stmt)
             print("----- SQL END -------")
-            run_sql(stmt, cfg)
-
-            # If this file declares an S3 prefix, and we just ran stmt 1 (DROP),
-            # clean the target folder before stmt 2 (CREATE)
-            if i == 1 and s3_prefix:
-                print(f"  -> deleting S3 prefix {s3_prefix}")
-                s3_delete_prefix(s3_prefix)
+            
+            if is_check_file:
+                if len(statements) != 1:
+                    raise RuntimeError(f"Check file must contain exactly one statement: {sql_file}")
+                expectation = expectation_from_filename(sql_file)
+                print(f"     expectation = {expectation}")
+                run_check_sql(stmt, cfg, expectation=expectation)
+            else:
+                run_sql(stmt, cfg)
+                # If this file declares an S3 prefix, and we just ran stmt 1 (DROP),
+                # clean the target folder before stmt 2 (CREATE)
+                if i == 1 and s3_prefix:
+                    print(f"  -> deleting S3 prefix {s3_prefix}")
+                    s3_delete_prefix(s3_prefix)
 
     print("\nAll transforms complete.")
 
