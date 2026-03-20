@@ -40,45 +40,6 @@ os.environ["AWS_REGION"] = PROJECT_AWS_REGION
 os.environ["AWS_DEFAULT_REGION"] = PROJECT_AWS_REGION
 PROJECT_AWS_PROFILE = os.environ.get("AWS_PROFILE", "healthcare-dev")
 
-# Mapping dictionary for dataset names to table names
-DATASET_KEY_TO_TABLE = {
-    "nh_providerinfo_oct2024": "raw_nh_providerinfo_oct2024",
-    "swing_bed_snf_data_oct2024": "raw_swing_bed_snf_data_oct2024",
-    "pbj_daily_nurse_staffing_q2_2024": "raw_pbj_daily_nurse_staffing_q2_2024",
-    "nh_qualitymsr_claims_oct2024": "raw_nh_qualitymsr_claims_oct2024",
-    "nh_qualitymsr_mds_oct2024": "raw_nh_qualitymsr_mds_oct2024",
-    "nh_ownership_oct2024": "raw_nh_ownership_oct2024",
-    "nh_penalties_oct2024": "raw_nh_penalties_oct2024",
-    "nh_surveydates_oct2024": "raw_nh_surveydates_oct2024",
-    "nh_surveysummary_oct2024": "raw_nh_surveysummary_oct2024",
-    "nh_firesafetycitations_oct2024": "raw_nh_firesafetycitations_oct2024",
-    "nh_healthcitations_oct2024": "raw_nh_healthcitations_oct2024",
-    "nh_covidvaxprovider_20241027": "raw_nh_covidvaxprovider_20241027",
-    "nh_covidvaxaverages_20241027": "raw_nh_covidvaxaverages_20241027",
-    "skilled_nursing_facility_quality_reporting_program_provider_data_oct2024": "raw_skilled_nursing_facility_quality_reporting_program_provider_data_oct2024",
-    "skilled_nursing_facility_quality_reporting_program_national_data_oct2024": "raw_skilled_nursing_facility_quality_reporting_program_national_data_oct2024",
-    "fy_2024_snf_vbp_aggregate_performance": "raw_fy_2024_snf_vbp_aggregate_performance",
-    "fy_2024_snf_vbp_facility_performance": "raw_fy_2024_snf_vbp_facility_performance",
-    "nh_stateusaverages_oct2024": "raw_nh_stateusaverages_oct2024",
-    "nh_datacollectionintervals_oct2024": "raw_nh_datacollectionintervals_oct2024",
-    "nh_hlthinspeccutpointsstate_oct2024": "raw_nh_hlthinspeccutpointsstate_oct2024",
-    "nh_citationdescriptions_oct2024": "raw_nh_citationdescriptions_oct2024",
-
-    # fixed tables
-    "raw_swing_bed_snf_data_oct2024_fixed": "raw_swing_bed_snf_data_oct2024_fixed",
-    "raw_nh_qualitymsr_claims_oct2024_fixed": "raw_nh_qualitymsr_claims_oct2024_fixed",
-    "raw_nh_qualitymsr_mds_oct2024_fixed": "raw_nh_qualitymsr_mds_oct2024_fixed",
-    "raw_nh_surveydates_oct2024_fixed": "raw_nh_surveydates_oct2024_fixed",
-    "raw_nh_firesafetycitations_oct2024_fixed": "raw_nh_firesafetycitations_oct2024_fixed",
-    "raw_nh_healthcitations_oct2024_fixed": "raw_nh_healthcitations_oct2024_fixed",
-    "raw_nh_ownership_oct2024_fixed": "raw_nh_ownership_oct2024_fixed",
-    "raw_nh_covidvaxprovider_20241027_fixed": "raw_nh_covidvaxprovider_20241027_fixed",
-    "raw_nh_covidvaxaverages_20241027_fixed": "raw_nh_covidvaxaverages_20241027_fixed",
-    "raw_nh_surveysummary_oct2024_fixed": "raw_nh_surveysummary_oct2024_fixed",
-    "raw_pbj_daily_nurse_staffing_q2_2024_fixed": "raw_pbj_daily_nurse_staffing_q2_2024_fixed",
-    "raw_snf_qrp_provider_data_oct2024_fixed": "raw_snf_qrp_provider_data_oct2024_fixed",
-}
-
 # ---------------------------
 # AWS clients
 # ---------------------------
@@ -132,6 +93,17 @@ def partition_location_from_s3_key(s3_key: str) -> str:
     prefix_parts = parts[:-1]
     return f"s3://healthcare-data-lake-gj/{'/'.join(prefix_parts)}/"
 
+
+def base_location_from_partition_location(partition_location: str) -> str:
+    """
+    s3://bucket/raw/foo/ingest_dt=2026-03-15/ -> s3://bucket/raw/foo/
+    """
+    marker = "/ingest_dt="
+    if marker not in partition_location:
+        raise ValueError(f"Partition marker not found in location: {partition_location}")
+    return partition_location.split(marker, 1)[0].rstrip("/") + "/"
+
+
 def build_add_partition_sql(
     *,
     database_name: str,
@@ -149,61 +121,61 @@ def build_add_partition_sql(
 def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
     """
     Build ALTER TABLE ... ADD IF NOT EXISTS PARTITION statements
-    for Glue tables that are partitioned by ingest_dt and have manifest-backed files.
+    by matching manifest s3_key prefixes to Glue table locations.
     """
-    inventory = {
-        row["table_name"]: row
-        for row in list_tables_with_partitions("healthcare_catalog_db")
-        if row["partitioned_by_ingest_dt"]
-    }
+    inventory_rows = list_tables_with_partitions("healthcare_catalog_db")
+
+    # keep only tables actually partitioned by ingest_dt
+    partitioned_tables = [
+        r for r in inventory_rows
+        if r["partitioned_by_ingest_dt"] and r.get("location")
+    ]
+
+    # normalize Glue locations
+    tables_by_location: Dict[str, List[str]] = {}
+    for row in partitioned_tables:
+        loc = normalize_s3_prefix(row["location"])
+        tables_by_location.setdefault(loc, []).append(row["table_name"])
 
     manifest_rows = get_manifest_file_rows(cfg)
 
     sql_statements: List[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
 
     for rec in manifest_rows:
         s3_key = rec.get("s3_key", "")
-        dataset_key = rec.get("dataset_key", "")
-
-        if not s3_key or not dataset_key:
+        if not s3_key or f"ingest_dt={ingest_dt}" not in s3_key:
             continue
 
-        # only create partitions for the actual uploaded/raw partition date
-        if f"ingest_dt={ingest_dt}" not in s3_key:
-            continue
+        partition_location = partition_location_from_s3_key(s3_key)
+        base_location = base_location_from_partition_location(partition_location)
+        base_location = normalize_s3_prefix(base_location)
 
-        table_name = DATASET_KEY_TO_TABLE.get(dataset_key)
-        if not table_name:
-            continue
+        matching_tables = tables_by_location.get(base_location, [])
+        for table_name in matching_tables:
+            key = (table_name, ingest_dt, partition_location)
+            if key in seen:
+                continue
+            seen.add(key)
 
-        if table_name not in inventory:
-            continue
-
-        key = (table_name, ingest_dt)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        location = partition_location_from_s3_key(s3_key)
-
-        sql_statements.append(
-            build_add_partition_sql(
-                database_name="healthcare_catalog_db",
-                table_name=table_name,
-                ingest_dt=ingest_dt,
-                location=location,
+            sql_statements.append(
+                build_add_partition_sql(
+                    database_name="healthcare_catalog_db",
+                    table_name=table_name,
+                    ingest_dt=ingest_dt,
+                    location=partition_location,
+                )
             )
-        )
 
     return sorted(sql_statements)
 
 # ---------------------------
-# S3 helpers (mainly for "aws rm" commands)
+# S3 helpers (mainly for "aws rm" commands), but also to help automate partitioning
 # ---------------------------
 
 def s3_client():
     return aws_session().client("s3")
+
 
 def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
     if not s3_uri.startswith("s3://"):
@@ -241,6 +213,10 @@ def s3_delete_prefix(s3_uri: str) -> None:
 
     if to_delete:
         s3.delete_objects(Bucket=bucket, Delete={"Objects": to_delete})
+
+
+def normalize_s3_prefix(s: str) -> str:
+    return s.rstrip("/") + "/"
 
 # ---------------------------
 # Athena helpers
