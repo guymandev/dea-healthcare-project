@@ -524,6 +524,9 @@ def main():
     checks_passed = 0
     checks_failed = 0
 
+    transformed_table_names: list[str] = []
+    failed_check_files: list[str] = []
+
     print(f"\nAuto-generated partition SQL count: {len(partition_sql)}")
     for stmt in partition_sql:
         print("----- PARTITION SQL START -----")
@@ -559,6 +562,7 @@ def main():
                     checks_passed += 1
                 except Exception:
                     checks_failed += 1
+                    failed_check_files.append(sql_file.name)
                     raise
 
             else:
@@ -567,6 +571,11 @@ def main():
                 # count CREATE TABLE / CTAS as a transformed table
                 if stmt.strip().upper().startswith("CREATE TABLE"):
                     transformed_tables += 1
+
+                    # try to capture the created table name
+                    tokens = stmt.strip().split()
+                    if len(tokens) >= 3:
+                        transformed_table_names.append(tokens[2])
 
                 # If this file declares an S3 prefix, and we just ran stmt 1 (DROP),
                 # clean the target folder before stmt 2 (CREATE)
@@ -579,6 +588,16 @@ def main():
     print(f"  transformed tables:    {transformed_tables}")
     print(f"  checks passed:         {checks_passed}")
     print(f"  checks failed:         {checks_failed}")
+
+    if transformed_table_names:
+        print("\nTransformed tables:")
+        for name in transformed_table_names:
+            print(f"  - {name}")
+
+    if failed_check_files:
+        print("\nFailed check files:")
+        for name in failed_check_files:
+            print(f"  - {name}")
 
     print("\nAll transforms complete.")
 
