@@ -517,12 +517,20 @@ def main():
     # Add partitions for tables, prior to running CTAS in following loop
     partition_sql = generate_partition_add_sql(cfg, ingest_dt)
 
+    partition_sql = generate_partition_add_sql(cfg, ingest_dt)
+
+    partitions_added = 0
+    transformed_tables = 0
+    checks_passed = 0
+    checks_failed = 0
+
     print(f"\nAuto-generated partition SQL count: {len(partition_sql)}")
     for stmt in partition_sql:
         print("----- PARTITION SQL START -----")
         print(stmt)
         print("----- PARTITION SQL END -------")
         run_sql(stmt, cfg)
+        partitions_added += 1
 
     for sql_file in iter_sql_files():
         sql_text = sql_file.read_text(encoding="utf-8")
@@ -542,16 +550,35 @@ def main():
             if is_check_file:
                 if len(statements) != 1:
                     raise RuntimeError(f"Check file must contain exactly one statement: {sql_file}")
+                
                 expectation = expectation_from_filename(sql_file)
                 print(f"     expectation = {expectation}")
-                run_check_sql(stmt, cfg, expectation=expectation)
+
+                try:
+                    run_check_sql(stmt, cfg, expectation=expectation)
+                    checks_passed += 1
+                except Exception:
+                    checks_failed += 1
+                    raise
+
             else:
                 run_sql(stmt, cfg)
+
+                # count CREATE TABLE / CTAS as a transformed table
+                if stmt.strip().upper().startswith("CREATE TABLE"):
+                    transformed_tables += 1
+
                 # If this file declares an S3 prefix, and we just ran stmt 1 (DROP),
                 # clean the target folder before stmt 2 (CREATE)
                 if i == 1 and s3_prefix:
                     print(f"  -> deleting S3 prefix {s3_prefix}")
                     s3_delete_prefix(s3_prefix)
+
+    print("\nRun summary")
+    print(f"  auto-added partitions: {partitions_added}")
+    print(f"  transformed tables:    {transformed_tables}")
+    print(f"  checks passed:         {checks_passed}")
+    print(f"  checks failed:         {checks_failed}")
 
     print("\nAll transforms complete.")
 
