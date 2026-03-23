@@ -58,16 +58,6 @@ def aws_session():
 def aws_region() -> str:
     return PROJECT_AWS_REGION
 
-# def aws_region() -> str:
-#     region = (
-#         os.environ.get("AWS_REGION")
-#         or os.environ.get("AWS_DEFAULT_REGION")
-#         or boto3.session.Session().region_name
-#     )
-#     if not region:
-#         raise RuntimeError("No AWS region configured.")
-#     return region
-
 def athena_client():
     return aws_session().client("athena")
 
@@ -158,6 +148,8 @@ def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
                 continue
             seen.add(key)
 
+            print(f"partition match: table={table_name} ingest_dt={ingest_dt} location={partition_location}")
+
             sql_statements.append(
                 build_add_partition_sql(
                     database_name="healthcare_catalog_db",
@@ -217,6 +209,15 @@ def s3_delete_prefix(s3_uri: str) -> None:
 
 def normalize_s3_prefix(s: str) -> str:
     return s.rstrip("/") + "/"
+
+
+def s3_key_exists(bucket: str, key: str) -> bool:
+    s3 = s3_client()
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except s3.exceptions.ClientError:
+        return False
 
 # ---------------------------
 # Athena helpers
@@ -284,6 +285,57 @@ def run_sql_fetch_rows(sql: str, cfg: AthenaConfig) -> List[List[str]]:
             vals = [col.get("VarCharValue", "") for col in row.get("Data", [])]
             rows.append(vals)
     return rows
+
+def run_sql_files(
+    files: Iterable[Path],
+    *,
+    ingest_dt: str,
+    cfg: AthenaConfig,
+    counters: dict
+) -> None:
+    for sql_file in files:
+        sql_text = sql_file.read_text(encoding="utf-8")
+        statements = split_sql_statements(sql_text)
+        s3_prefix = extract_s3_prefix(sql_text)
+
+        print(f"\n==> Running {sql_file} ({len(statements)} stmt)")
+        is_check_file = "90_checks" in str(sql_file)
+
+        for i, stmt in enumerate(statements, 1):
+            stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
+            print(f"  -> stmt {i}/{len(statements)}")
+            print("----- SQL START -----")
+            print(stmt)
+            print("----- SQL END -------")
+
+            if is_check_file:
+                if len(statements) != 1:
+                    raise RuntimeError(f"Check file must contain exactly one statement: {sql_file}")
+
+                expectation = expectation_from_filename(sql_file)
+                print(f"     expectation = {expectation}")
+
+                try:
+                    run_check_sql(stmt, cfg, expectation=expectation)
+                    counters["checks_passed"] += 1
+                except Exception:
+                    counters["checks_failed"] += 1
+                    counters["failed_check_files"].append(sql_file.name)
+                    raise
+
+            else:
+                run_sql(stmt, cfg)
+
+                stmt_upper = stmt.strip().upper()
+                if stmt_upper.startswith("CREATE TABLE"):
+                    counters["transformed_tables"] += 1
+                    tokens = stmt.strip().split()
+                    if len(tokens) >= 3:
+                        counters["transformed_table_names"].append(tokens[2])
+
+                if i == 1 and s3_prefix:
+                    print(f"  -> deleting S3 prefix {s3_prefix}")
+                    s3_delete_prefix(s3_prefix)
 
 # --------------------------------
 # Helpers for data validation checks
@@ -373,14 +425,21 @@ def split_sql_statements(text: str) -> List[str]:
     return [p for p in parts if p.strip()]
 
 
-def iter_sql_files() -> Iterable[Path]:
-    for d in ORDERED_DIRS:
+# def iter_sql_files() -> Iterable[Path]:
+#     for d in ORDERED_DIRS:
+#         folder = SQL_ROOT / d
+#         if not folder.exists():
+#             continue
+#         for p in sorted(folder.glob("*.sql")):
+#             yield p
+
+def iter_sql_files_for_dirs(dir_names: List[str]) -> Iterable[Path]:
+    for d in dir_names:
         folder = SQL_ROOT / d
         if not folder.exists():
             continue
         for p in sorted(folder.glob("*.sql")):
             yield p
-
 
 # ---------------------------
 # Manifest / ingest_dt lookup
@@ -514,18 +573,26 @@ def main():
     print_inventory("healthcare_catalog_db")
     print_inventory("healthcare_curated_db")
 
-    # Add partitions for tables, prior to running CTAS in following loop
+    # counters
+    counters = {
+        "partitions_added": 0,
+        "transformed_tables": 0,
+        "checks_passed": 0,
+        "checks_failed": 0,
+        "transformed_table_names": [],
+        "failed_check_files": [],
+    }
+
+    # Phase 1: bootstrap + fixed table DDL
+    run_sql_files(
+        iter_sql_files_for_dirs(["00_bootstrap", "10_fixed"]),
+        ingest_dt=ingest_dt,
+        cfg=cfg,
+        counters=counters,
+    )
+
+    # Phase 2: auto-add partitions AFTER fixed tables exist
     partition_sql = generate_partition_add_sql(cfg, ingest_dt)
-
-    partition_sql = generate_partition_add_sql(cfg, ingest_dt)
-
-    partitions_added = 0
-    transformed_tables = 0
-    checks_passed = 0
-    checks_failed = 0
-
-    transformed_table_names: list[str] = []
-    failed_check_files: list[str] = []
 
     print(f"\nAuto-generated partition SQL count: {len(partition_sql)}")
     for stmt in partition_sql:
@@ -533,70 +600,30 @@ def main():
         print(stmt)
         print("----- PARTITION SQL END -------")
         run_sql(stmt, cfg)
-        partitions_added += 1
+        counters["partitions_added"] += 1
 
-    for sql_file in iter_sql_files():
-        sql_text = sql_file.read_text(encoding="utf-8")
-        statements = split_sql_statements(sql_text)
-        s3_prefix = extract_s3_prefix(sql_text)
-
-        print(f"\n==> Running {sql_file} ({len(statements)} stmt)")
-        is_check_file = "90_checks" in str(sql_file)
-
-        for i, stmt in enumerate(statements, 1):
-            stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
-            print(f"  -> stmt {i}/{len(statements)}")
-            print("----- SQL START -----")
-            print(stmt)
-            print("----- SQL END -------")
-            
-            if is_check_file:
-                if len(statements) != 1:
-                    raise RuntimeError(f"Check file must contain exactly one statement: {sql_file}")
-                
-                expectation = expectation_from_filename(sql_file)
-                print(f"     expectation = {expectation}")
-
-                try:
-                    run_check_sql(stmt, cfg, expectation=expectation)
-                    checks_passed += 1
-                except Exception:
-                    checks_failed += 1
-                    failed_check_files.append(sql_file.name)
-                    raise
-
-            else:
-                run_sql(stmt, cfg)
-
-                # count CREATE TABLE / CTAS as a transformed table
-                if stmt.strip().upper().startswith("CREATE TABLE"):
-                    transformed_tables += 1
-
-                    # try to capture the created table name
-                    tokens = stmt.strip().split()
-                    if len(tokens) >= 3:
-                        transformed_table_names.append(tokens[2])
-
-                # If this file declares an S3 prefix, and we just ran stmt 1 (DROP),
-                # clean the target folder before stmt 2 (CREATE)
-                if i == 1 and s3_prefix:
-                    print(f"  -> deleting S3 prefix {s3_prefix}")
-                    s3_delete_prefix(s3_prefix)
+    # Phase 3: curated builds + checks
+    run_sql_files(
+        iter_sql_files_for_dirs(["20_curated", "90_checks"]),
+        ingest_dt=ingest_dt,
+        cfg=cfg,
+        counters=counters,
+    )
 
     print("\nRun summary")
-    print(f"  auto-added partitions: {partitions_added}")
-    print(f"  transformed tables:    {transformed_tables}")
-    print(f"  checks passed:         {checks_passed}")
-    print(f"  checks failed:         {checks_failed}")
+    print(f"  auto-added partitions: {counters['partitions_added']}")
+    print(f"  transformed tables:    {counters['transformed_tables']}")
+    print(f"  checks passed:         {counters['checks_passed']}")
+    print(f"  checks failed:         {counters['checks_failed']}")
 
-    if transformed_table_names:
+    if counters["transformed_table_names"]:
         print("\nTransformed tables:")
-        for name in transformed_table_names:
+        for name in counters["transformed_table_names"]:
             print(f"  - {name}")
 
-    if failed_check_files:
+    if counters["failed_check_files"]:
         print("\nFailed check files:")
-        for name in failed_check_files:
+        for name in counters["failed_check_files"]:
             print(f"  - {name}")
 
     print("\nAll transforms complete.")

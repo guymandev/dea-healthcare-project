@@ -139,6 +139,15 @@ def s3_upload_file(local_path: Path, bucket: str, key: str) -> None:
     s3 = s3_client()
     s3.upload_file(Filename=str(local_path), Bucket=bucket, Key=key)
 
+
+def s3_key_exists(bucket: str, key: str) -> bool:
+    s3 = s3_client()
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except s3.exceptions.ClientError:
+        return False
+
 # ---------------------------
 # Text file helpers for creating JSONL manifest
 # ---------------------------
@@ -155,19 +164,37 @@ def manifest_files_to_jsonl(latest_manifest: Dict[str, Any]) -> str:
     """
     Emit one JSON object per line, one per file entry in latest_manifest['files'].
     Each line also includes ingest_dt and run_ts_utc for easy querying.
+
+    Only include rows whose s3_key currently exists in S3.
     """
     ingest_dt = latest_manifest.get("ingest_dt")
     run_ts_utc = latest_manifest.get("run_ts_utc")
+    bucket = latest_manifest.get("bucket") or BUCKET
 
     lines = []
+    skipped_missing = 0
+
     for f in latest_manifest.get("files", []):
+        s3_key = f.get("s3_key")
+
+        # If there's no s3_key, skip it.
+        if not s3_key:
+            skipped_missing += 1
+            continue
+
+        # Only include rows that point to a real S3 object.
+        if not s3_key_exists(bucket, s3_key):
+            skipped_missing += 1
+            continue
+
         row = {
             "ingest_dt": ingest_dt,
             "run_ts_utc": run_ts_utc,
-            # the rest is the file entry
             **f,
         }
         lines.append(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
+
+    print(f"manifest_files_to_jsonl: kept={len(lines)} skipped_missing={skipped_missing}")
     return "\n".join(lines) + ("\n" if lines else "")
 
 # Utility function to execute a one-off write of the JSONL file
