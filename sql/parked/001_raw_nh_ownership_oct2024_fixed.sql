@@ -1,7 +1,5 @@
 DROP TABLE IF EXISTS healthcare_catalog_db.raw_nh_ownership_oct2024_fixed;
 
--- S3_PREFIX: s3://healthcare-data-lake-gj/raw/nh_ownership_oct2024/
-
 CREATE EXTERNAL TABLE healthcare_catalog_db.raw_nh_ownership_oct2024_fixed (
   cms_certification_number_ccn                 string,
   provider_name                                string,

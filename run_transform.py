@@ -286,6 +286,28 @@ def run_sql_fetch_rows(sql: str, cfg: AthenaConfig) -> List[List[str]]:
             rows.append(vals)
     return rows
 
+def validate_sql_file_s3_prefix_usage(sql_text: str, sql_file: Path) -> None:
+    """
+    Fail fast if a SQL file combines:
+      -- S3_PREFIX: ...
+    with:
+      CREATE EXTERNAL TABLE ...
+
+    That combination would make the runner delete underlying source data,
+    which is not allowed.
+    """
+    s3_prefix = extract_s3_prefix(sql_text)
+    if not s3_prefix:
+        return
+
+    upper_sql = sql_text.upper()
+    if "CREATE EXTERNAL TABLE" in upper_sql:
+        raise RuntimeError(
+            f"{sql_file} uses -- S3_PREFIX with CREATE EXTERNAL TABLE. "
+            f"This is not allowed because EXTERNAL TABLE LOCATION points to source data. "
+            f"Remove the S3_PREFIX comment from this file."
+        )
+
 def run_sql_files(
     files: Iterable[Path],
     *,
@@ -295,6 +317,10 @@ def run_sql_files(
 ) -> None:
     for sql_file in files:
         sql_text = sql_file.read_text(encoding="utf-8")
+
+        # Fail-fast safety check before any execution/splitting
+        validate_sql_file_s3_prefix_usage(sql_text, sql_file)
+
         statements = split_sql_statements(sql_text)
         s3_prefix = extract_s3_prefix(sql_text)
 
@@ -333,6 +359,7 @@ def run_sql_files(
                     if len(tokens) >= 3:
                         counters["transformed_table_names"].append(tokens[2])
 
+                 # Only cleanup after stmt 1 when this file declares a CTAS output prefix
                 if i == 1 and s3_prefix:
                     print(f"  -> deleting S3 prefix {s3_prefix}")
                     s3_delete_prefix(s3_prefix)
