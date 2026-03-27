@@ -1,6 +1,6 @@
 DROP TABLE IF EXISTS healthcare_curated_db.fact_survey_event;
 
--- aws s3 rm s3://healthcare-data-lake-gj/curated/fact_survey_event/ --recursive
+-- S3_PREFIX: s3://healthcare-data-lake-gj/curated/fact_survey_event/
 
 CREATE TABLE healthcare_curated_db.fact_survey_event
 WITH (
