@@ -187,6 +187,76 @@ def extract_s3_prefix(sql_text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def s3_prefix_has_objects(s3_uri: str) -> bool:
+    """
+    Return True if the S3 prefix contains at least one object.
+    """
+    bucket, prefix = parse_s3_uri(s3_uri)
+    s3 = s3_client()
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return resp.get("KeyCount", 0) > 0
+
+
+def preflight_ctas_output_prefix(
+    *,
+    sql_text: str,
+    sql_file: Path,
+    s3_prefix: Optional[str],
+    auto_delete_ctas_output: bool = True,
+) -> None:
+    """
+    For CTAS files that declare -- S3_PREFIX, verify whether the target prefix
+    already contains objects before the query runs.
+
+    If files are present:
+      - delete them automatically when auto_delete_ctas_output=True
+      - otherwise fail fast with a clear error
+    """
+    if not s3_prefix:
+        return
+
+    upper_sql = sql_text.upper()
+
+    # Only apply this guard to CTAS / CREATE TABLE outputs.
+    # CREATE EXTERNAL TABLE is explicitly handled elsewhere and must not use S3_PREFIX.
+    if "CREATE TABLE" not in upper_sql or "CREATE EXTERNAL TABLE" in upper_sql:
+        return
+
+    if s3_prefix_has_objects(s3_prefix):
+        if auto_delete_ctas_output:
+            print(f"  -> preflight cleanup: deleting non-empty CTAS prefix {s3_prefix}")
+            s3_delete_prefix(s3_prefix)
+        else:
+            raise RuntimeError(
+                f"{sql_file} CTAS target prefix is not empty: {s3_prefix}. "
+                "Athena CTAS locations must be empty before reuse. "
+                "Delete the prefix or enable auto_delete_ctas_output."
+            )
+
+
+def validate_sql_file_s3_prefix_usage(sql_text: str, sql_file: Path) -> None:
+    """
+    Fail fast if a SQL file combines:
+      -- S3_PREFIX: ...
+    with:
+      CREATE EXTERNAL TABLE ...
+
+    That combination would make the runner delete underlying source data,
+    which is not allowed.
+    """
+    s3_prefix = extract_s3_prefix(sql_text)
+    if not s3_prefix:
+        return
+
+    upper_sql = sql_text.upper()
+    if "CREATE EXTERNAL TABLE" in upper_sql:
+        raise RuntimeError(
+            f"{sql_file} uses -- S3_PREFIX with CREATE EXTERNAL TABLE. "
+            "This is not allowed because EXTERNAL TABLE LOCATION points to source data. "
+            "Remove the S3_PREFIX comment from this file."
+        )
+
+
 def s3_delete_prefix(s3_uri: str) -> None:
     bucket, prefix = parse_s3_uri(s3_uri)
     s3 = s3_client()
@@ -308,27 +378,38 @@ def validate_sql_file_s3_prefix_usage(sql_text: str, sql_file: Path) -> None:
             f"Remove the S3_PREFIX comment from this file."
         )
 
+
 def run_sql_files(
     files: Iterable[Path],
     *,
     ingest_dt: str,
     cfg: AthenaConfig,
-    counters: dict
+    counters: dict,
+    auto_delete_ctas_output: bool = True,
 ) -> None:
     for sql_file in files:
         sql_text = sql_file.read_text(encoding="utf-8")
 
-        # Fail-fast safety check before any execution/splitting
+        # Safeguard 1: EXTERNAL TABLE files must never declare S3_PREFIX
         validate_sql_file_s3_prefix_usage(sql_text, sql_file)
 
         statements = split_sql_statements(sql_text)
         s3_prefix = extract_s3_prefix(sql_text)
+
+        # Safeguard 2: for CTAS files, optionally clean non-empty target prefix
+        preflight_ctas_output_prefix(
+            sql_text=sql_text,
+            sql_file=sql_file,
+            s3_prefix=s3_prefix,
+            auto_delete_ctas_output=auto_delete_ctas_output,
+        )
 
         print(f"\n==> Running {sql_file} ({len(statements)} stmt)")
         is_check_file = "90_checks" in str(sql_file)
 
         for i, stmt in enumerate(statements, 1):
             stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
+
             print(f"  -> stmt {i}/{len(statements)}")
             print("----- SQL START -----")
             print(stmt)
@@ -336,7 +417,9 @@ def run_sql_files(
 
             if is_check_file:
                 if len(statements) != 1:
-                    raise RuntimeError(f"Check file must contain exactly one statement: {sql_file}")
+                    raise RuntimeError(
+                        f"Check file must contain exactly one statement: {sql_file}"
+                    )
 
                 expectation = expectation_from_filename(sql_file)
                 print(f"     expectation = {expectation}")
@@ -353,16 +436,20 @@ def run_sql_files(
                 run_sql(stmt, cfg)
 
                 stmt_upper = stmt.strip().upper()
+
                 if stmt_upper.startswith("CREATE TABLE"):
                     counters["transformed_tables"] += 1
                     tokens = stmt.strip().split()
                     if len(tokens) >= 3:
                         counters["transformed_table_names"].append(tokens[2])
 
-                 # Only cleanup after stmt 1 when this file declares a CTAS output prefix
+                # Keep this existing cleanup behavior too.
+                # In practice, after adding the preflight cleanup above, this may often be a no-op,
+                # but leaving it in place is harmless.
                 if i == 1 and s3_prefix:
                     print(f"  -> deleting S3 prefix {s3_prefix}")
                     s3_delete_prefix(s3_prefix)
+
 
 # --------------------------------
 # Helpers for data validation checks
