@@ -1,6 +1,6 @@
 DROP TABLE IF EXISTS healthcare_curated_db.fact_state_covid_vax_avgs;
 
--- S3_PREFIX: s3://healthcare-data-lake-gj/curated/fact_state_covid_vax_avgs/ --recursive
+-- S3_PREFIX: s3://healthcare-data-lake-gj/curated/fact_state_covid_vax_avgs/
 
 CREATE TABLE healthcare_curated_db.fact_state_covid_vax_avgs
 WITH (
