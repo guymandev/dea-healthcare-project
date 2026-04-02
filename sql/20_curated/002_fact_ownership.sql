@@ -30,7 +30,7 @@ WITH base AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_ownership_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:nh_ownership_oct2024}}'
     AND cms_certification_number_ccn IS NOT NULL
     AND association_date IS NOT NULL
     AND owner_name IS NOT NULL

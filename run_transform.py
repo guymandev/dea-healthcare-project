@@ -108,20 +108,75 @@ def build_add_partition_sql(
         LOCATION '{location}'
         """.strip()
 
-def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
+# def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
+#     """
+#     Build ALTER TABLE ... ADD IF NOT EXISTS PARTITION statements
+#     by matching manifest s3_key prefixes to Glue table locations.
+#     """
+#     inventory_rows = list_tables_with_partitions("healthcare_catalog_db")
+
+#     # keep only tables actually partitioned by ingest_dt
+#     partitioned_tables = [
+#         r for r in inventory_rows
+#         if r["partitioned_by_ingest_dt"] and r.get("location")
+#     ]
+
+#     # normalize Glue locations
+#     tables_by_location: Dict[str, List[str]] = {}
+#     for row in partitioned_tables:
+#         loc = normalize_s3_prefix(row["location"])
+#         tables_by_location.setdefault(loc, []).append(row["table_name"])
+
+#     manifest_rows = get_manifest_file_rows(cfg)
+
+#     sql_statements: List[str] = []
+#     seen: set[tuple[str, str, str]] = set()
+
+#     for rec in manifest_rows:
+#         s3_key = rec.get("s3_key", "")
+#         if not s3_key or f"ingest_dt={ingest_dt}" not in s3_key:
+#             continue
+
+#         partition_location = partition_location_from_s3_key(s3_key)
+#         base_location = base_location_from_partition_location(partition_location)
+#         base_location = normalize_s3_prefix(base_location)
+
+#         matching_tables = tables_by_location.get(base_location, [])
+#         for table_name in matching_tables:
+#             key = (table_name, ingest_dt, partition_location)
+#             if key in seen:
+#                 continue
+#             seen.add(key)
+
+#             print(f"partition match: table={table_name} ingest_dt={ingest_dt} location={partition_location}")
+
+#             sql_statements.append(
+#                 build_add_partition_sql(
+#                     database_name="healthcare_catalog_db",
+#                     table_name=table_name,
+#                     ingest_dt=ingest_dt,
+#                     location=partition_location,
+#                 )
+#             )
+
+#     return sorted(sql_statements)
+
+
+def generate_partition_add_sql(cfg: AthenaConfig) -> List[str]:
     """
     Build ALTER TABLE ... ADD IF NOT EXISTS PARTITION statements
     by matching manifest s3_key prefixes to Glue table locations.
+
+    Uses each manifest row's own ingest_dt (per-file latest available date),
+    not one global ingest_dt for the whole run.
     """
     inventory_rows = list_tables_with_partitions("healthcare_catalog_db")
 
-    # keep only tables actually partitioned by ingest_dt
     partitioned_tables = [
         r for r in inventory_rows
         if r["partitioned_by_ingest_dt"] and r.get("location")
     ]
 
-    # normalize Glue locations
     tables_by_location: Dict[str, List[str]] = {}
     for row in partitioned_tables:
         loc = normalize_s3_prefix(row["location"])
@@ -134,7 +189,9 @@ def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
 
     for rec in manifest_rows:
         s3_key = rec.get("s3_key", "")
-        if not s3_key or f"ingest_dt={ingest_dt}" not in s3_key:
+        ingest_dt = rec.get("ingest_dt", "")
+
+        if not s3_key or not ingest_dt:
             continue
 
         partition_location = partition_location_from_s3_key(s3_key)
@@ -148,7 +205,11 @@ def generate_partition_add_sql(cfg: AthenaConfig, ingest_dt: str) -> List[str]:
                 continue
             seen.add(key)
 
-            print(f"partition match: table={table_name} ingest_dt={ingest_dt} location={partition_location}")
+            print(
+                f"partition match: table={table_name} "
+                f"ingest_dt={ingest_dt} "
+                f"location={partition_location}"
+            )
 
             sql_statements.append(
                 build_add_partition_sql(
@@ -233,28 +294,6 @@ def preflight_ctas_output_prefix(
                 "Delete the prefix or enable auto_delete_ctas_output."
             )
 
-
-def validate_sql_file_s3_prefix_usage(sql_text: str, sql_file: Path) -> None:
-    """
-    Fail fast if a SQL file combines:
-      -- S3_PREFIX: ...
-    with:
-      CREATE EXTERNAL TABLE ...
-
-    That combination would make the runner delete underlying source data,
-    which is not allowed.
-    """
-    s3_prefix = extract_s3_prefix(sql_text)
-    if not s3_prefix:
-        return
-
-    upper_sql = sql_text.upper()
-    if "CREATE EXTERNAL TABLE" in upper_sql:
-        raise RuntimeError(
-            f"{sql_file} uses -- S3_PREFIX with CREATE EXTERNAL TABLE. "
-            "This is not allowed because EXTERNAL TABLE LOCATION points to source data. "
-            "Remove the S3_PREFIX comment from this file."
-        )
 
 
 def s3_delete_prefix(s3_uri: str) -> None:
@@ -382,7 +421,7 @@ def validate_sql_file_s3_prefix_usage(sql_text: str, sql_file: Path) -> None:
 def run_sql_files(
     files: Iterable[Path],
     *,
-    ingest_dt: str,
+    dataset_ingest_map: Dict[str, str],
     cfg: AthenaConfig,
     counters: dict,
     auto_delete_ctas_output: bool = True,
@@ -408,7 +447,8 @@ def run_sql_files(
         is_check_file = "90_checks" in str(sql_file)
 
         for i, stmt in enumerate(statements, 1):
-            stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
+            # stmt = stmt.replace("{{INGEST_DT}}", ingest_dt)
+            stmt = render_sql_with_dataset_ingest_dt(stmt, dataset_ingest_map)
 
             print(f"  -> stmt {i}/{len(statements)}")
             print("----- SQL START -----")
@@ -559,22 +599,40 @@ def iter_sql_files_for_dirs(dir_names: List[str]) -> Iterable[Path]:
 # Manifest / ingest_dt lookup
 # ---------------------------
 
-def get_latest_ingest_dt_from_manifest(cfg: AthenaConfig) -> Optional[str]:
+# def get_latest_ingest_dt_from_manifest(cfg: AthenaConfig) -> Optional[str]:
+#     sql = """
+#     SELECT max(regexp_extract(s3_key, 'ingest_dt=([0-9]{4}-[0-9]{2}-[0-9]{2})', 1)) AS ingest_dt
+#     FROM healthcare_catalog_db.manifest_latest_files
+#     WHERE s3_key IS NOT NULL
+#     """
+#     rows = run_sql_fetch_rows(sql, cfg)
+
+#     # Expect:
+#     # rows[0] = header
+#     # rows[1] = data
+#     if len(rows) < 2:
+#         return None
+
+#     ingest_dt = rows[1][0].strip() if rows[1] and rows[1][0] else None
+#     return ingest_dt or None
+
+def get_dataset_ingest_map(cfg: AthenaConfig) -> Dict[str, str]:
     sql = """
-    SELECT max(regexp_extract(s3_key, 'ingest_dt=([0-9]{4}-[0-9]{2}-[0-9]{2})', 1)) AS ingest_dt
+    SELECT dataset_key, ingest_dt
     FROM healthcare_catalog_db.manifest_latest_files
-    WHERE s3_key IS NOT NULL
+    WHERE dataset_key IS NOT NULL
+      AND ingest_dt IS NOT NULL
     """
     rows = run_sql_fetch_rows(sql, cfg)
-
-    # Expect:
-    # rows[0] = header
-    # rows[1] = data
     if len(rows) < 2:
-        return None
+        return {}
 
-    ingest_dt = rows[1][0].strip() if rows[1] and rows[1][0] else None
-    return ingest_dt or None
+    header = rows[0]
+    out = {}
+    for row in rows[1:]:
+        rec = {header[i]: row[i] if i < len(row) else "" for i in range(len(header))}
+        out[rec["dataset_key"]] = rec["ingest_dt"]
+    return out
 
 def get_manifest_file_rows(cfg: AthenaConfig) -> List[Dict[str, str]]:
     sql = """
@@ -601,6 +659,50 @@ def get_manifest_file_rows(cfg: AthenaConfig) -> List[Dict[str, str]]:
         out.append(rec)
 
     return out
+
+
+# def render_sql_with_dataset_ingest_dt(sql: str, dataset_ingest_map: Dict[str, str]) -> str:
+#     def repl(match):
+#         dataset_key = match.group(1)
+#         if dataset_key not in dataset_ingest_map:
+#             raise RuntimeError(
+#                 f"No latest ingest_dt found for dataset_key={dataset_key}. "
+#                 "Either restore the file or park the dependent SQL."
+#             )
+#         return dataset_ingest_map[dataset_key]
+
+#     return re.sub(r"\{\{INGEST_DT:([^}]+)\}\}", repl, sql)
+
+
+def render_sql_with_dataset_ingest_dt(sql: str, dataset_ingest_map: Dict[str, str]) -> str:
+    """
+    Replace placeholders of the form:
+      {{INGEST_DT:dataset_key}}
+
+    Example:
+      {{INGEST_DT:nh_qualitymsr_claims_oct2024}}
+    """
+
+    def repl(match):
+        dataset_key = match.group(1)
+        if dataset_key not in dataset_ingest_map:
+            raise RuntimeError(
+                f"No latest ingest_dt found for dataset_key={dataset_key}. "
+                "Either restore the file or park the dependent SQL."
+            )
+        return dataset_ingest_map[dataset_key]
+
+    rendered = re.sub(r"\{\{INGEST_DT:([^}]+)\}\}", repl, sql)
+
+    # Optional fail-fast: catch old placeholders so they don't silently survive.
+    if "{{INGEST_DT}}" in rendered:
+        raise RuntimeError(
+            "Found legacy {{INGEST_DT}} placeholder after dataset-specific rendering. "
+            "Update this SQL file to use {{INGEST_DT:dataset_key}}."
+        )
+
+    return rendered
+
 
 # ---------------------------
 # Glue inventory helpers
@@ -674,14 +776,25 @@ def main():
     print("boto3 session profile =", aws_session().profile_name)
     print("sts caller identity =", aws_session().client("sts").get_caller_identity()["Arn"])    
 
-    ingest_dt = get_latest_ingest_dt_from_manifest(cfg) or os.environ.get("INGEST_DT")
-    if not ingest_dt:
+    # ingest_dt = get_latest_ingest_dt_from_manifest(cfg) or os.environ.get("INGEST_DT")
+    # if not ingest_dt:
+    #     raise RuntimeError(
+    #         "No INGEST_DT available. "
+    #         "Set env INGEST_DT=YYYY-MM-DD or ensure healthcare_catalog_db.manifest_latest_files is populated."
+    #     )
+
+    # print(f"Using ingest_dt={ingest_dt}")
+
+    dataset_ingest_map = get_dataset_ingest_map(cfg)
+    if not dataset_ingest_map:
         raise RuntimeError(
-            "No INGEST_DT available. "
-            "Set env INGEST_DT=YYYY-MM-DD or ensure healthcare_catalog_db.manifest_latest_files is populated."
+            "No dataset ingest map available. "
+            "Ensure healthcare_catalog_db.manifest_latest_files is populated."
         )
 
-    print(f"Using ingest_dt={ingest_dt}")
+    print(f"Dataset ingest map count = {len(dataset_ingest_map)}")
+    for k in sorted(dataset_ingest_map)[:10]:
+        print(f"  {k} -> {dataset_ingest_map[k]}")
 
     # Optional visibility: print inventories before running
     print_inventory("healthcare_catalog_db")
@@ -697,16 +810,25 @@ def main():
         "failed_check_files": [],
     }
 
+
+    # run_sql_files(
+    #     iter_sql_files_for_dirs(["00_bootstrap", "10_fixed"]),
+    #     ingest_dt=ingest_dt,
+    #     cfg=cfg,
+    #     counters=counters,
+    # )
+
     # Phase 1: bootstrap + fixed table DDL
     run_sql_files(
         iter_sql_files_for_dirs(["00_bootstrap", "10_fixed"]),
-        ingest_dt=ingest_dt,
+        dataset_ingest_map=dataset_ingest_map,
         cfg=cfg,
         counters=counters,
     )
 
+
     # Phase 2: auto-add partitions AFTER fixed tables exist
-    partition_sql = generate_partition_add_sql(cfg, ingest_dt)
+    partition_sql = generate_partition_add_sql(cfg)
 
     print(f"\nAuto-generated partition SQL count: {len(partition_sql)}")
     for stmt in partition_sql:
@@ -719,7 +841,7 @@ def main():
     # Phase 3: curated builds + checks
     run_sql_files(
         iter_sql_files_for_dirs(["20_curated", "90_checks"]),
-        ingest_dt=ingest_dt,
+        dataset_ingest_map=dataset_ingest_map,
         cfg=cfg,
         counters=counters,
     )

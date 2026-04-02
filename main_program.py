@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import time
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -147,6 +148,14 @@ def s3_key_exists(bucket: str, key: str) -> bool:
         return True
     except s3.exceptions.ClientError:
         return False
+    
+
+def extract_ingest_dt_from_s3_key(s3_key: Optional[str]) -> Optional[str]:
+    if not s3_key:
+        return None
+    m = re.search(r"/ingest_dt=([0-9]{4}-[0-9]{2}-[0-9]{2})/", s3_key)
+    return m.group(1) if m else None
+
 
 # ---------------------------
 # Text file helpers for creating JSONL manifest
@@ -160,42 +169,99 @@ def s3_put_text(bucket: str, key: str, text: str, content_type: str = "text/plai
         ContentType=content_type,
     )
 
+
+# def manifest_files_to_jsonl(latest_manifest: Dict[str, Any]) -> str:
+#     """
+#     Emit one JSON object per line, one per file entry in latest_manifest['files'].
+
+#     ingest_dt in the JSONL means the file's actual data ingest date
+#     (derived from or stored with its s3_key), not the latest manifest run date.
+#     """
+#     manifest_run_ingest_dt = latest_manifest.get("ingest_dt")
+#     run_ts_utc = latest_manifest.get("run_ts_utc")
+#     bucket = latest_manifest.get("bucket") or BUCKET
+#     source = latest_manifest.get("source")
+#     raw_prefix = latest_manifest.get("raw_prefix")
+
+#     lines = []
+#     skipped_missing = 0
+
+#     for f in latest_manifest.get("files", []):
+#         s3_key = f.get("s3_key")
+#         if not s3_key:
+#             skipped_missing += 1
+#             continue
+
+#         if not s3_key_exists(bucket, s3_key):
+#             skipped_missing += 1
+#             continue
+
+#         data_ingest_dt = f.get("data_ingest_dt") or extract_ingest_dt_from_s3_key(s3_key)
+
+#         row = {
+#             "ingest_dt": data_ingest_dt,  # <-- this becomes per-file data date
+#             "manifest_run_ingest_dt": manifest_run_ingest_dt,
+#             "run_ts_utc": run_ts_utc,
+#             "source": source,
+#             "bucket": bucket,
+#             "raw_prefix": raw_prefix,
+#             **f,
+#         }
+#         lines.append(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
+
+#     print(f"manifest_files_to_jsonl: kept={len(lines)} skipped_missing={skipped_missing}")
+#     return "\n".join(lines) + ("\n" if lines else "")
+
+
 def manifest_files_to_jsonl(latest_manifest: Dict[str, Any]) -> str:
     """
     Emit one JSON object per line, one per file entry in latest_manifest['files'].
-    Each line also includes ingest_dt and run_ts_utc for easy querying.
 
-    Only include rows whose s3_key currently exists in S3.
+    ingest_dt in the JSONL means the file's actual data ingest date
+    (derived from or stored with its s3_key), not the latest manifest run date.
+
+    manifest_run_ingest_dt means the ingest date of the manifest-producing run.
     """
-    ingest_dt = latest_manifest.get("ingest_dt")
+    manifest_run_ingest_dt = latest_manifest.get("ingest_dt")
     run_ts_utc = latest_manifest.get("run_ts_utc")
     bucket = latest_manifest.get("bucket") or BUCKET
+    source = latest_manifest.get("source")
+    raw_prefix = latest_manifest.get("raw_prefix")
 
     lines = []
     skipped_missing = 0
 
     for f in latest_manifest.get("files", []):
         s3_key = f.get("s3_key")
-
-        # If there's no s3_key, skip it.
         if not s3_key:
             skipped_missing += 1
             continue
 
-        # Only include rows that point to a real S3 object.
         if not s3_key_exists(bucket, s3_key):
             skipped_missing += 1
             continue
 
+        data_ingest_dt = f.get("data_ingest_dt") or extract_ingest_dt_from_s3_key(s3_key)
+
+        # Drop redundant field(s) from the emitted JSONL row.
+        file_entry = dict(f)
+        file_entry.pop("data_ingest_dt", None)
+
         row = {
-            "ingest_dt": ingest_dt,
+            "ingest_dt": data_ingest_dt,  # per-file actual data date
+            "manifest_run_ingest_dt": manifest_run_ingest_dt,
             "run_ts_utc": run_ts_utc,
-            **f,
+            "source": source,
+            "bucket": bucket,
+            "raw_prefix": raw_prefix,
+            **file_entry,
         }
+
         lines.append(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
 
     print(f"manifest_files_to_jsonl: kept={len(lines)} skipped_missing={skipped_missing}")
     return "\n".join(lines) + ("\n" if lines else "")
+
 
 # Utility function to execute a one-off write of the JSONL file
 # without needing to rerun the entire ingest.
@@ -312,21 +378,17 @@ def ingest_once() -> Dict[str, Any]:
     print("AWS_PROFILE =", os.environ.get("AWS_PROFILE"))
 
     # ---------------------------
-    # Load prior manifest + build prior_checksums from BOTH lists
+    # Load prior manifest state
     # ---------------------------
     prior = s3_get_json(BUCKET, LATEST_MANIFEST_KEY) or {}
     print("prior loaded? ", prior is not None)
 
-    # Collect prior entries from multiple possible keys (backward compatible)
     prior_entries = []
     for k in ("files", "skipped_unchanged", "files_uploaded", "all_files"):
         v = prior.get(k)
         if isinstance(v, list):
             prior_entries.extend(v)
 
-    # print("prior entries count:", len(prior_entries))
-
-    # Index by basename so path differences never break matching
     prior_by_name: Dict[str, Dict[str, Any]] = {}
     for e in prior_entries:
         fn = e.get("filename")
@@ -334,14 +396,13 @@ def ingest_once() -> Dict[str, Any]:
         if not fn or not sha:
             continue
         key = Path(fn).name
-        # keep the first one; they're usually identical anyway
         prior_by_name.setdefault(key, e)
 
     prior_checksums = {k: v.get("sha256") for k, v in prior_by_name.items()}
     print("prior unique filenames:", len(prior_checksums))
 
     # ---------------------------
-    # Build this run's manifest (UNCHANGED structure)
+    # Build this run's manifest
     # ---------------------------
     manifest: Dict[str, Any] = {
         "ingest_dt": ingest_dt,
@@ -349,8 +410,8 @@ def ingest_once() -> Dict[str, Any]:
         "source": "google_drive_public",
         "bucket": BUCKET,
         "raw_prefix": RAW_PREFIX,
-        "files": [],              # uploaded this run
-        "skipped_unchanged": [],  # skipped this run
+        "files": [],
+        "skipped_unchanged": [],
         "errors": [],
     }
 
@@ -359,17 +420,14 @@ def ingest_once() -> Dict[str, Any]:
     try:
         download_drive_folder(folder_dir)
     except FileURLRetrievalError as e:
-        # record the issue at the run level and continue (maybe PBJ still works)
         manifest["errors"].append({
             "filename": None,
             "dataset_key": None,
             "error": f"Drive folder download failed: {repr(e)}"
         })
-        # Continue the run with whatever may have downloaded already
 
     # 2) Download PBJ standalone file
     pbj_dir = TMP_DIR / "pbj"
-    # download_pbj_file(pbj_dir)
     try:
         download_pbj_file(pbj_dir)
     except FileURLRetrievalError as e:
@@ -379,7 +437,6 @@ def ingest_once() -> Dict[str, Any]:
             "error": f"PBJ download failed: {repr(e)}"
         })
 
-
     # 3) Process all downloaded data files
     all_files = list(iter_data_files(folder_dir)) + list(iter_data_files(pbj_dir))
     print(f"Downloaded data files: {len(all_files)}")
@@ -387,25 +444,49 @@ def ingest_once() -> Dict[str, Any]:
 
     for file_path in all_files:
         filename = file_path.name
-        filename_key = Path(filename).name  # basename
+        filename_key = Path(filename).name
         dataset_key = dataset_key_from_filename(filename)
+
+        if "ownership" in filename.lower():
+            print("OWNERSHIP FILE SEEN:", filename)
 
         try:
             checksum = sha256_file(file_path)
             size_bytes = file_path.stat().st_size
 
+            prev = prior_by_name.get(filename_key, {})
+            prev_checksum = prev.get("sha256")
+            prev_s3_key = prev.get("s3_key")
+
+            same_checksum = (prev_checksum == checksum)
+            s3_still_exists = bool(prev_s3_key) and s3_key_exists(BUCKET, prev_s3_key)
+
             if filename_key in prior_checksums:
-                print("COMPARE", filename_key, "prior:", prior_checksums[filename_key], "new:", checksum)
+                print(
+                    "COMPARE",
+                    filename_key,
+                    "prior:", prev_checksum,
+                    "new:", checksum,
+                    "same_checksum:", same_checksum,
+                    "prev_s3_key:", prev_s3_key,
+                    "s3_still_exists:", s3_still_exists,
+                )
             else:
                 print("NO PRIOR ENTRY FOR", filename_key)
 
-            if prior_checksums.get(filename_key) == checksum:
+            # Only skip when BOTH checksum matches and the prior object still exists.
+            if same_checksum and s3_still_exists:
                 manifest["skipped_unchanged"].append(
-                    {"filename": filename_key, "sha256": checksum, "size_bytes": size_bytes}
+                    {
+                        "filename": filename_key,
+                        "sha256": checksum,
+                        "size_bytes": size_bytes,
+                    }
                 )
                 file_path.unlink(missing_ok=True)
                 continue
 
+            # Otherwise upload/re-upload to heal missing objects or handle changed files.
             s3_key = f"{RAW_PREFIX}/{dataset_key}/ingest_dt={ingest_dt}/{filename_key}"
             s3_upload_file(file_path, BUCKET, s3_key)
 
@@ -416,6 +497,9 @@ def ingest_once() -> Dict[str, Any]:
                     "s3_key": s3_key,
                     "size_bytes": size_bytes,
                     "sha256": checksum,
+                    "data_ingest_dt": ingest_dt,
+                    "last_seen_run_ingest_dt": ingest_dt,
+                    "last_seen_run_ts_utc": run_ts,
                 }
             )
 
@@ -426,7 +510,13 @@ def ingest_once() -> Dict[str, Any]:
             except Exception:
                 pass
 
-            manifest["errors"].append({"filename": filename_key, "dataset_key": dataset_key, "error": repr(e)})
+            manifest["errors"].append(
+                {
+                    "filename": filename_key,
+                    "dataset_key": dataset_key,
+                    "error": repr(e),
+                }
+            )
 
         finally:
             try:
@@ -436,61 +526,58 @@ def ingest_once() -> Dict[str, Any]:
                 pass
 
     # ---------------------------
-    # 4) Write manifests (archive run manifest + durable latest state)
+    # 4) Write manifests
     # ---------------------------
     archive_key = f"{CONTROL_PREFIX}/manifests/ingest_dt={ingest_dt}/manifest.json"
-
-    # Archive manifest: keep exactly as-is (so your current outputs remain correct)
     s3_put_json(BUCKET, archive_key, manifest)
 
-    # Latest manifest: durable state snapshot
-    # - keep current fields
-    # - but also ensure `files` contains ALL known file entries so future runs don't oscillate
     latest_manifest = deepcopy(manifest)
     latest_manifest["manifest_kind"] = "latest_state"
-    latest_manifest["archive_manifest_s3_key"] = archive_key  # breadcrumb
+    latest_manifest["archive_manifest_s3_key"] = archive_key
 
-    # Start from prior state (all known files), then overlay updates from this run
-    # We'll store "state" entries in latest_manifest["files"].
     state_by_name: Dict[str, Dict[str, Any]] = {}
 
-    # Seed with prior entries
+    # Seed with prior state
     for name, e in prior_by_name.items():
         state_by_name[name] = dict(e)
 
-    # Apply skipped: ensure they exist in state (keep prior s3_key/dataset_key if present)
+    # Apply skipped: preserve prior s3_key/dataset_key/data_ingest_dt
     for e in manifest["skipped_unchanged"]:
         name = Path(e["filename"]).name
         prev = state_by_name.get(name, {})
+
         state_by_name[name] = {
             **prev,
             "filename": name,
             "sha256": e.get("sha256"),
             "size_bytes": e.get("size_bytes"),
+            "last_seen_run_ingest_dt": ingest_dt,
+            "last_seen_run_ts_utc": run_ts,
         }
 
-    # Apply uploaded: overwrite state with new s3_key etc.
+        if not state_by_name[name].get("data_ingest_dt"):
+            state_by_name[name]["data_ingest_dt"] = extract_ingest_dt_from_s3_key(
+                state_by_name[name].get("s3_key")
+            )
+
+    # Apply uploads/re-uploads
     for e in manifest["files"]:
         name = Path(e["filename"]).name
         state_by_name[name] = dict(e)
 
-    # In latest_state, put the *state* into `files`
     latest_manifest["files"] = list(state_by_name.values())
-
-    # Optional: keep a convenience list too (harmless)
     latest_manifest["all_files"] = latest_manifest["files"]
 
-    # Write latest manifest JSON
     s3_put_json(BUCKET, LATEST_MANIFEST_KEY, latest_manifest)
 
     # 5) Also write JSONL "latest files" view for Athena
-    LATEST_FILES_JSONL_KEY = f"{CONTROL_PREFIX}/manifests/latest_files/files.jsonl"
-    jsonl_text = manifest_files_to_jsonl(latest_manifest)  # uses latest_manifest["files"]
+    latest_files_jsonl_key = f"{CONTROL_PREFIX}/manifests/latest_files/files.jsonl"
+    jsonl_text = manifest_files_to_jsonl(latest_manifest)
     s3_put_text(
         BUCKET,
-        LATEST_FILES_JSONL_KEY,
+        latest_files_jsonl_key,
         jsonl_text,
-        content_type="application/x-ndjson"
+        content_type="application/x-ndjson",
     )
 
     return {
