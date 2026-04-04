@@ -650,36 +650,6 @@ def get_manifest_run_ingest_dt(bucket: str, latest_manifest_key: str) -> str:
     return ingest_dt
 
 
-# def render_sql_with_dataset_ingest_dt(sql: str, dataset_ingest_map: Dict[str, str]) -> str:
-#     """
-#     Replace placeholders of the form:
-#       {{INGEST_DT:dataset_key}}
-
-#     Example:
-#       {{INGEST_DT:nh_qualitymsr_claims_oct2024}}
-#     """
-
-#     def repl(match):
-#         dataset_key = match.group(1)
-#         if dataset_key not in dataset_ingest_map:
-#             raise RuntimeError(
-#                 f"No latest ingest_dt found for dataset_key={dataset_key}. "
-#                 "Either restore the file or park the dependent SQL."
-#             )
-#         return dataset_ingest_map[dataset_key]
-
-#     rendered = re.sub(r"\{\{INGEST_DT:([^}]+)\}\}", repl, sql)
-
-#     # Optional fail-fast: catch old placeholders so they don't silently survive.
-#     if "{{INGEST_DT}}" in rendered:
-#         raise RuntimeError(
-#             "Found legacy {{INGEST_DT}} placeholder after dataset-specific rendering. "
-#             "Update this SQL file to use {{INGEST_DT:dataset_key}}."
-#         )
-
-#     return rendered
-
-
 # ---------------------------
 # Glue inventory helpers
 # ---------------------------
