@@ -9,4 +9,5 @@ SELECT coalesce(
   ),
   0
 ) AS dupes
-FROM healthcare_curated_db.fact_ownership;
+FROM healthcare_curated_db.fact_ownership
+WHERE ingest_dt = '{{INGEST_DT:nh_ownership_oct2024}}';

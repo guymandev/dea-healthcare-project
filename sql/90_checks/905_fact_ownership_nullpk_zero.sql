@@ -13,4 +13,5 @@ SELECT coalesce(
   ),
   0
 ) AS null_pk_rows
-FROM healthcare_curated_db.fact_ownership;
+FROM healthcare_curated_db.fact_ownership
+WHERE ingest_dt = '{{INGEST_DT:nh_ownership_oct2024}}';
