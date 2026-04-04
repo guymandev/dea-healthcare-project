@@ -36,7 +36,7 @@ WITH base AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_penalties_oct2024
-  WHERE ingest_dt = '{{INGEST_DT}}' 
+  WHERE ingest_dt = '{{INGEST_DT:nh_penalties_oct2024}}' 
 ),
 
 with_date AS (

@@ -54,7 +54,7 @@ WITH base AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_surveysummary_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'   
+  WHERE ingest_dt = '{{INGEST_DT:nh_surveysummary_oct2024}}'   
     AND cms_certification_number_ccn IS NOT NULL
     AND trim(cast(cms_certification_number_ccn as varchar)) <> ''
     AND inspection_cycle IS NOT NULL

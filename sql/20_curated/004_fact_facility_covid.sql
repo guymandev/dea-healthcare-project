@@ -27,8 +27,8 @@ WITH base AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_covidvaxprovider_20241027_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
-    AND cms_certification_number_ccn IS NOT NULL
+  WHERE ingest_dt = '{{INGEST_DT:nh_covidvaxprovider_20241027}}'
+  AND cms_certification_number_ccn IS NOT NULL
 )
 SELECT
   ccn_provnum,

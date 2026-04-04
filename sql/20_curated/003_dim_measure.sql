@@ -17,7 +17,7 @@ WITH all_measures AS (
     nullif(regexp_replace(trim(measure_code), '"', ''), '') as measure_code,
     nullif(trim(measure_description), '') as measure_description
   FROM healthcare_catalog_db.raw_nh_qualitymsr_claims_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:nh_qualitymsr_claims_oct2024}}'
 
   UNION ALL
 
@@ -26,7 +26,7 @@ WITH all_measures AS (
     nullif(regexp_replace(trim(measure_code), '"', ''), '') as measure_code,
     nullif(trim(measure_description), '') as measure_description
   FROM healthcare_catalog_db.raw_nh_qualitymsr_mds_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:nh_qualitymsr_mds_oct2024}}'
 
   UNION ALL
 
@@ -34,8 +34,8 @@ WITH all_measures AS (
   SELECT
     nullif(regexp_replace(trim(measure_code), '"', ''), '') as measure_code,
     cast(null as varchar) as measure_description
-  FROM healthcare_catalog_db.raw_snf_qrp_provider_data_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  FROM healthcare_catalog_db.raw_skilled_nursing_facility_quality_reporting_program_provider_data_oct2024_fixed
+  WHERE ingest_dt = '{{INGEST_DT:skilled_nursing_facility_quality_reporting_program_provider_data_oct2024}}'
 
   UNION ALL
 
@@ -44,7 +44,7 @@ WITH all_measures AS (
     nullif(regexp_replace(trim(measure_code), '"', ''), '') as measure_code,
     cast(null as varchar) as measure_description
   FROM healthcare_catalog_db.raw_swing_bed_snf_data_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:swing_bed_snf_data_oct2024}}'
 ),
 
 dedup AS (
@@ -60,5 +60,5 @@ dedup AS (
 SELECT
   measure_code,
   measure_description,
-  CAST('{{INGEST_DT}}' AS varchar) as ingest_dt
+  CAST('{{MANIFEST_RUN_INGEST_DT}}' AS varchar) as ingest_dt
 FROM dedup;

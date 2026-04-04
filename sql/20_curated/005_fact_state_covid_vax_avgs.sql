@@ -27,6 +27,6 @@ SELECT
 
   ingest_dt
 FROM healthcare_catalog_db.raw_nh_covidvaxaverages_20241027_fixed
-WHERE ingest_dt = '{{INGEST_DT}}'
+WHERE ingest_dt = '{{INGEST_DT:nh_covidvaxaverages_20241027}}'
   AND state_raw IS NOT NULL
   AND trim(state_raw) <> '';

@@ -61,7 +61,7 @@ WITH base AS (
     try_cast(hrs_medaide_ctr AS double)  AS hrs_medaide_ctr
 
   FROM healthcare_catalog_db.raw_pbj_daily_nurse_staffing_q2_2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'   
+  WHERE ingest_dt = '{{INGEST_DT:pbj_daily_nurse_staffing_q2_2024}}'   
     AND workdate IS NOT NULL
     AND length(trim(cast(workdate AS varchar))) = 8
     AND regexp_like(trim(cast(workdate AS varchar)), '^[0-9]{8}$')

@@ -33,7 +33,7 @@ WITH fire AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_firesafetycitations_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:nh_firesafetycitations_oct2024}}'
 ),
 health AS (
   SELECT
@@ -58,7 +58,7 @@ health AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_healthcitations_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}'
+  WHERE ingest_dt = '{{INGEST_DT:nh_healthcitations_oct2024}}'
 ),
 unioned AS (
   SELECT * FROM fire

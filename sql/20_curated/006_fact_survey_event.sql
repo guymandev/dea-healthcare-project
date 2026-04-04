@@ -17,7 +17,7 @@ WITH base AS (
     try_cast(survey_cycle as integer) AS survey_cycle,
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_surveydates_oct2024_fixed
-  WHERE ingest_dt='{{INGEST_DT}}'
+  WHERE ingest_dt='{{INGEST_DT:nh_surveydates_oct2024}}'
     AND cms_certification_number_ccn IS NOT NULL
 )
 SELECT

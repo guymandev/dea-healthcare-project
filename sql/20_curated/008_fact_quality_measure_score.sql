@@ -62,7 +62,7 @@ WITH claims AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_qualitymsr_claims_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}' 
+  WHERE ingest_dt = '{{INGEST_DT:nh_qualitymsr_mds_oct2024}}' 
     AND cms_certification_number_ccn IS NOT NULL
     AND measure_code IS NOT NULL
     AND measure_period IS NOT NULL
@@ -122,7 +122,7 @@ mds AS (
 
     ingest_dt
   FROM healthcare_catalog_db.raw_nh_qualitymsr_mds_oct2024_fixed
-  WHERE ingest_dt = '{{INGEST_DT}}' 
+  WHERE ingest_dt = '{{INGEST_DT:nh_qualitymsr_claims_oct2024}}' 
     AND cms_certification_number_ccn IS NOT NULL
     AND measure_code IS NOT NULL
     AND measure_period IS NOT NULL
