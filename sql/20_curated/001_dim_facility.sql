@@ -12,77 +12,55 @@ WITH (
 WITH provider AS (
   SELECT
     lpad(
-      regexp_replace(trim(cast(p."cms certification number (ccn)" AS varchar)), '"', ''),
+      regexp_replace(trim(p.ccn_provnum), '"', ''),
       6, '0'
     ) AS ccn_provnum,
-
-    cast(p."provider name" AS varchar)    AS provider_name,
-    cast(p."provider address" AS varchar) AS provider_address,
-    cast(p."city/town" AS varchar)        AS provider_city,
-    cast(p."state" AS varchar)            AS provider_state,
-    lpad(cast(p."zip code" AS varchar), 5, '0') AS provider_zip_code,
-
-    try_cast(p."number of certified beds" AS integer) AS number_of_certified_beds,
-
-    try_cast(p."average number of residents per day" AS double) AS avg_residents_per_day,
-    cast(p."average number of residents per day footnote" AS varchar) AS avg_residents_per_day_footnote,
-
-    try_cast(p."reported rn staffing hours per resident per day" AS double)
+    regexp_replace(trim(p.provider_name), '"', '')    AS provider_name,
+    regexp_replace(trim(p.provider_address), '"', '') AS provider_address,
+    regexp_replace(trim(p.provider_city), '"', '')    AS provider_city,
+    regexp_replace(trim(p.provider_state), '"', '')   AS provider_state,
+    lpad(regexp_replace(trim(p.provider_zip_code), '"', ''), 5, '0') AS provider_zip_code,
+    try_cast(p.number_of_certified_beds AS integer)   AS number_of_certified_beds,
+    try_cast(p.avg_residents_per_day AS double)       AS avg_residents_per_day,
+    regexp_replace(trim(p.avg_residents_per_day_footnote), '"', '') AS avg_residents_per_day_footnote,
+    try_cast(p.reported_rn_staffing_hours_per_resident_per_day AS double)
       AS reported_rn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."reported licensed staffing hours per resident per day" AS double)
+    try_cast(p.reported_licensed_staffing_hours_per_resident_per_day AS double)
       AS reported_licensed_staffing_hours_per_resident_per_day,
-
-    try_cast(p."reported total nurse staffing hours per resident per day" AS double)
+    try_cast(p.reported_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS reported_total_nurse_staffing_hours_per_resident_per_day,
-
-    try_cast(p."total number of nurse staff hours per resident per day on the weekend" AS double)
+    try_cast(p.weekend_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS weekend_total_nurse_staffing_hours_per_resident_per_day,
-
-    try_cast(p."registered nurse hours per resident per day on the weekend" AS double)
+    try_cast(p.weekend_rn_staffing_hours_per_resident_per_day AS double)
       AS weekend_rn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."reported physical therapist staffing hours per resident per day" AS double)
+    try_cast(p.reported_physical_therapist_staffing_hours_per_resident_per_day AS double)
       AS reported_physical_therapist_staffing_hours_per_resident_per_day,
-
-    try_cast(p."nursing case-mix index" AS double) AS nursing_case_mix_index,
-    try_cast(p."nursing case-mix index ratio" AS double) AS nursing_case_mix_index_ratio,
-
-    try_cast(p."case-mix nurse aide staffing hours per resident per day" AS double)
+    try_cast(p.nursing_case_mix_index AS double)      AS nursing_case_mix_index,
+    try_cast(p.nursing_case_mix_index_ratio AS double) AS nursing_case_mix_index_ratio,
+    try_cast(p.case_mix_nurse_aide_staffing_hours_per_resident_per_day AS double)
       AS case_mix_nurse_aide_staffing_hours_per_resident_per_day,
-
-    try_cast(p."case-mix lpn staffing hours per resident per day" AS double)
+    try_cast(p.case_mix_lpn_staffing_hours_per_resident_per_day AS double)
       AS case_mix_lpn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."case-mix rn staffing hours per resident per day" AS double)
+    try_cast(p.case_mix_rn_staffing_hours_per_resident_per_day AS double)
       AS case_mix_rn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."case-mix total nurse staffing hours per resident per day" AS double)
+    try_cast(p.case_mix_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS case_mix_total_nurse_staffing_hours_per_resident_per_day,
-
-    try_cast(p."case-mix weekend total nurse staffing hours per resident per day" AS double)
+    try_cast(p.case_mix_weekend_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS case_mix_weekend_total_nurse_staffing_hours_per_resident_per_day,
-
-    try_cast(p."adjusted nurse aide staffing hours per resident per day" AS double)
+    try_cast(p.adjusted_nurse_aide_staffing_hours_per_resident_per_day AS double)
       AS adjusted_nurse_aide_staffing_hours_per_resident_per_day,
-
-    try_cast(p."adjusted lpn staffing hours per resident per day" AS double)
+    try_cast(p.adjusted_lpn_staffing_hours_per_resident_per_day AS double)
       AS adjusted_lpn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."adjusted rn staffing hours per resident per day" AS double)
+    try_cast(p.adjusted_rn_staffing_hours_per_resident_per_day AS double)
       AS adjusted_rn_staffing_hours_per_resident_per_day,
-
-    try_cast(p."adjusted total nurse staffing hours per resident per day" AS double)
+    try_cast(p.adjusted_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS adjusted_total_nurse_staffing_hours_per_resident_per_day,
-
-    try_cast(p."adjusted weekend total nurse staffing hours per resident per day" AS double)
+    try_cast(p.adjusted_weekend_total_nurse_staffing_hours_per_resident_per_day AS double)
       AS adjusted_weekend_total_nurse_staffing_hours_per_resident_per_day
-
-  FROM healthcare_catalog_db.raw_nh_providerinfo_oct2024 p
+  FROM healthcare_catalog_db.raw_nh_providerinfo_oct2024_fixed p
   WHERE p.ingest_dt = '{{INGEST_DT:nh_providerinfo_oct2024}}'
-    AND p."cms certification number (ccn)" IS NOT NULL
+    AND p.ccn_provnum IS NOT NULL
 ),
-
 swing AS (
   SELECT
     lpad(regexp_replace(trim(cms_certification_number_ccn), '"', ''), 6, '0') AS ccn_provnum,
@@ -92,7 +70,6 @@ swing AS (
     AND cms_certification_number_ccn IS NOT NULL
   GROUP BY 1, 2
 )
-
 SELECT
   pr.ccn_provnum,
   pr.provider_name,
@@ -101,7 +78,6 @@ SELECT
   pr.provider_state,
   pr.provider_zip_code,
   sw.cms_region,
-
   pr.number_of_certified_beds,
   pr.avg_residents_per_day,
   pr.avg_residents_per_day_footnote,
@@ -123,7 +99,6 @@ SELECT
   pr.adjusted_rn_staffing_hours_per_resident_per_day,
   pr.adjusted_total_nurse_staffing_hours_per_resident_per_day,
   pr.adjusted_weekend_total_nurse_staffing_hours_per_resident_per_day,
-
   CAST('{{MANIFEST_RUN_INGEST_DT}}' AS varchar) AS ingest_dt
 FROM provider pr
 LEFT JOIN swing sw
