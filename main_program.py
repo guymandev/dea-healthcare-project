@@ -35,7 +35,21 @@ QUARANTINE_PREFIX = os.environ.get("QUARANTINE_PREFIX", "quarantine")
 
 LATEST_MANIFEST_KEY = f"{CONTROL_PREFIX}/manifests/latest/manifest.json"
 
-TMP_DIR = Path("/tmp/data_download") if "AWS_LAMBDA_FUNCTION_NAME" in os.environ else Path("./data_download")
+#TMP_DIR = Path("/tmp/data_download") if "AWS_LAMBDA_FUNCTION_NAME" in os.environ else Path("./data_download")
+TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/data_download"))
+
+_session = None
+
+# Function for use by ECS Fargate
+def aws_session():
+    global _session
+    if _session is None:
+        profile = os.environ.get("AWS_PROFILE")  # will be None in Fargate
+        _session = boto3.Session(
+            profile_name=profile,  # None = use IAM role automatically
+            region_name=aws_region()
+        )
+    return _session
 
 
 # ---------------------------

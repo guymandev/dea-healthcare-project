@@ -50,11 +50,13 @@ PROJECT_BUCKET = "healthcare-data-lake-gj"
 
 _session = None
 
+# Function for use by ECS Fargate
 def aws_session():
     global _session
     if _session is None:
+        profile = os.environ.get("AWS_PROFILE")  # None in Fargate
         _session = boto3.Session(
-            profile_name=PROJECT_AWS_PROFILE,
+            profile_name=profile,  # None = use IAM role automatically
             region_name=aws_region()
         )
     return _session
