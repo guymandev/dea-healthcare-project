@@ -170,3 +170,100 @@ Both stages print detailed logs covering:
 - final run summaries
 
 This is especially useful when debugging through ECS/Fargate and CloudWatch logs.
+
+### Ingest Stage Details
+
+#### Responsibilities
+- download source files from Google Drive
+- detect changed files using checksums
+- upload changed files into S3 raw partitions
+- maintain manifests and latest inventory files
+- quarantine failures when possible
+
+#### Notable implementation details
+- uses retry-hardended S3 client configuration
+- writes JSON manifests with ```Content-MD5``` integrity checking so S3 can validate the uploaded payload in transit
+- supports atomic-ish temp-key copy semantics for JSON writes
+- stores run metadata including ```run_ts_utc```
+- preserves file-level metadata such as checksum, size, ```data_ingest_dt```, and last-seen run details
+
+#### Example output artifacts
+- ```control/manifests/ingest_dt=<YYYY-MM-DD>/manifest.json```
+- ```control/manifests/latest/manifest.json```
+- ```control/manifests/latest_files/files.jsonl```
+
+### Transform Stage Details
+
+#### Responsibilities
+- connect to Athena and Glue
+- query latest manifest inventory
+- resolve dataset-specific ingest dates
+- execute ordered SQL files
+- run final validation checks
+
+#### Notable implementation details
+- validates that the project runs in the expected AWS region
+- supports local named-profile execution or IAM-role-based execution in Fargate
+- parses ```-- S3_PREFIX:``` metadata from SQL files
+- preflights CTAS output prefixes
+- fetches Athena result rows for validation logic
+- prints a final run summary with partitions added, tables transformed, and checks passed/failed
+
+### Orchestration
+The runtime flow is orchestrated with AWS Step Functions:
+
+**1.** Run the ingest ECS/Fargate task 
+
+**2.** Wait for completion
+
+**3.** Run the transform ECS/Fargate task
+
+This ensures the transform stage always runs against the most recent raw data and manifest/control artifacts.
+
+EventBridge Scheduler triggers the state machine on a recurring schedule.
+
+### Deployment Model
+
+#### Local development
+Both Python modules support local development using an AWS named profile. If ```AWS_PROFILE``` is present, boto3 uses it when constructing the session.
+
+#### ECS / Fargate execution
+When running in Fargate, ```AWS_PROFILE``` is absent, so the code creates a boto3 session without a profile name and automatically uses the ECS task IAM role instead.
+
+#### Dashboard deployment
+The Streamlit application is deployed separately and uses Streamlit Cloud secrets to connect to the curated analytics layer. 
+
+### How to Run
+
+#### Run ingest locally
+```python3 main_program.py```
+
+The performs a single ingest cycle and prints a JSON summary at the end.
+
+#### Run transform locally
+```python3 run_transform.py```
+
+This runs the ordered SQL pipeline, generates partition DDL, executes curated transformations, and performs validation checks.
+
+#### Run in AWS
+
+**1.** Build container images for the ingest and transform modules
+
+**2.** Push the images to separate ECR repositories
+
+**3.** Register ECS task definitions for each image
+
+**4.** Create a Step Functions state machine that runs ingest first and transform second
+
+**5.** Create an EventBridge Scheduler schedule to trigger the state machine on a recurring cadence
+
+### Validation and Observability
+The project includes several built-in observability and quality mechanisms:
+- checksum-based change detection at ingest time
+- archived and latest-state manifest persistence
+- JSONL inventory output for easier Athena querying
+- quarantine handling for problematic files
+- Athena SQL execution logging with statement output
+- automatic partition-generation logging
+- filename-driven validation checks
+- final run summary counters for partitions, transformed tables, and checks passed/failed
