@@ -563,3 +563,20 @@ Note: The subnet setting for each task was obtained by manually running a task a
 ### EventBridge Schedule
 
 ![healthcare event schedule](image/healthcare-event-schedule.png)
+
+### initial_analysis.py
+
+This is a one-off code module that was created for the purpose of performing an inventory and analysis of the various files involved with the project. It analyzed each file and the data within it, evaluating nulls, cardinality, and best key guesses, based on the presence of specified words in the field names. 
+
+It output a final summary on the bash command line and saved off in a text file, detailing:
+
+- filename
+- rows
+- cols
+- top_null_cols
+- top_cardinality_cols
+- best_key_guess
+- best_key_dupes
+- best_key_uniqueness_ratio
+
+In addition, the module generated two additional CSV output file artifacts: 1) a file containing the final summary output from the above, and 2) a separate file detailing potential key field candidates based on the analysis done by the logic in the module. 
