@@ -16,6 +16,26 @@ The final solution is containerized, deployed to Amazon ECR, executed as ECS/Far
 
 ---
 
+## Design Artifacts
+
+### Requirements
+
+https://docs.google.com/document/d/157bbXEilQNwaxbkX9mx-6FXcIv0VgO-9T9uacWAhEh4/edit?tab=t.0#heading=h.y5u6lrxvyr99
+
+### Architecture Design Document
+
+https://app.diagrams.net/?src=about#G11iCahIcH_l5pAPWaTNyd7V3M9DlMwPon#%7B%22pageId%22%3A%22rtwNVA8DXy5ze71Piad0%22%7D
+
+![healthcare project design document](image/healthcare-project-design-document.png)
+
+### Database design
+
+https://dbdiagram.io/d/Healthcare-Project-69a1316ba3f0aa31e1445bac
+
+![healthcare project DB design](image/healthcare-project-db-design.png)
+
+---
+
 ## Architecture
 
 ### High-level flow
