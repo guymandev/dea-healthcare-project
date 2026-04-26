@@ -510,6 +510,11 @@ ECR access was managed via a dedicated policy ("healthcare-ecr-policy"), as desc
     ]
 }
 ```
+The "healthcare-ecr-policy" is utilized by:
+
+- healthcare-ecr-role
+- healthcare-ingest-task-role
+
 ### ECRs
 
 	• healthcare-ingest
