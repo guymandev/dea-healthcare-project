@@ -91,6 +91,8 @@ EventBridge Scheduler triggers the Step Functions state machine on a recurring s
 ### Streamlit Community Cloud
 The final analytics dashboard is deployed separately on Streamlit Cloud and queries the curated healthcare analytics layer.
 
+Link to streamlit dashboard repo: https://github.com/guymandev/dea-healthcare-streamlit
+
 ---
 
 ## Data Flow
