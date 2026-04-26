@@ -55,6 +55,17 @@ S3 serves as both the data lake and the control-store layer. The ingest stage wr
 - manifest artifacts under the control prefix
 - quarantine outputs for files that fail ingest processing. 
 
+#### S3 folder structure
+
+healthcare-data-lake-gj:
+
+	• athena_query_results/
+	• control/
+	• curated/
+	• quarantine/
+	• raw/
+  • run_log/
+
 ### Amazon ECS / AWS Fargate
 Both runtime stages are containerized and executed as ECS tasks on Fargate. The code is written to use IAM-role-based credentials automatically in Fargate, while still supporting local AWS profiles during development.
 
@@ -267,3 +278,288 @@ The project includes several built-in observability and quality mechanisms:
 - automatic partition-generation logging
 - filename-driven validation checks
 - final run summary counters for partitions, transformed tables, and checks passed/failed
+
+## Addendum
+
+Local development was done via an IAM user configured with the following policy details:
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3ListBucketForProjectPrefixes",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::healthcare-data-lake-gj",
+            "Condition": {
+                "StringLike": {
+                    "s3:prefix": [
+                        "raw/*",
+                        "control/*",
+                        "curated/*",
+                        "quarantine/*",
+                        "athena_query_results/*"
+                    ]
+                }
+            }
+        },
+        {
+            "Sid": "GetBucketLocation",
+            "Effect": "Allow",
+            "Action": "s3:GetBucketLocation",
+            "Resource": "arn:aws:s3:::healthcare-data-lake-gj"
+        },
+        {
+            "Sid": "S3ObjectRWProjectPrefixes",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:AbortMultipartUpload",
+                "s3:GetObjectTagging",
+                "s3:PutObjectTagging"
+            ],
+            "Resource": [
+                "arn:aws:s3:::healthcare-data-lake-gj/raw/*",
+                "arn:aws:s3:::healthcare-data-lake-gj/control/*",
+                "arn:aws:s3:::healthcare-data-lake-gj/curated/*",
+                "arn:aws:s3:::healthcare-data-lake-gj/quarantine/*",
+                "arn:aws:s3:::healthcare-data-lake-gj/athena_query_results/*"
+            ]
+        },
+        {
+            "Sid": "AthenaDev",
+            "Effect": "Allow",
+            "Action": [
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:StopQueryExecution",
+                "athena:ListWorkGroups",
+                "athena:GetWorkGroup"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "GlueCatalogDev",
+            "Effect": "Allow",
+            "Action": [
+                "glue:CreateDatabase",
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:UpdateDatabase",
+                "glue:DeleteDatabase",
+                "glue:CreateTable",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:CreateCrawler",
+                "glue:GetCrawler",
+                "glue:GetCrawlers",
+                "glue:UpdateCrawler",
+                "glue:DeleteCrawler",
+                "glue:StartCrawler",
+                "glue:StopCrawler",
+                "glue:GetPartition",
+                "glue:GetPartitions",
+                "glue:BatchCreatePartition",
+                "glue:BatchDeletePartition"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CloudWatchLogsReadWrite",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:DescribeLogGroups",
+                "logs:DescribeLogStreams"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+```
+
+ECR access was managed via a dedicated policy ("healthcare-ecr-policy"), as described below:
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ECSTaskCloudWatchLogging",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*"
+        },
+        {
+            "Sid": "S3AccessForIngestionAndOutputs",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": [
+                "arn:aws:s3:::healthcare-data-lake-gj",
+                "arn:aws:s3:::healthcare-data-lake-gj/*"
+            ]
+        },
+        {
+            "Sid": "AthenaAccess",
+            "Effect": "Allow",
+            "Action": [
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:BatchGetQueryExecution",
+                "athena:ListQueryExecutions"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "GlueAccess",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetTable",
+                "glue:GetPartition",
+                "glue:GetTables",
+                "glue:GetDatabases",
+                "glue:CreateTable",
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:CreateDatabase",
+                "glue:BatchCreatePartition",
+                "glue:GetJob",
+                "glue:GetJobRun",
+                "glue:StartJobRun",
+                "glue:CreateJob",
+                "glue:UpdateJob",
+                "glue:DeleteJob"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "ECRPushAndPull",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+                "ecr:DescribeImages",
+                "ecr:ListImages",
+                "ecr:PutImage",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:DescribeRepositories",
+                "ecr:CreateRepository"
+            ],
+            "Resource": [
+                "arn:aws:ecr:*:*:repository/*",
+                "*"
+            ]
+        },
+        {
+            "Sid": "GeneralConfig",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+```
+### ECRs
+
+	• healthcare-ingest
+    • healthcare-transform
+
+### ECS tasks
+
+	• healthcare-ingest-task
+    • healthcare-transform-task
+
+### ECS cluster - utilized by Fargate
+
+    • healthcare-cluster
+
+### Step Function State Machine
+
+    • healthcare-state-machine
+
+State machine details:
+
+```
+{
+  "Comment": "Healthcare pipeline",
+  "StartAt": "RunIngest",
+  "States": {
+    "RunIngest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "healthcare-cluster",
+        "TaskDefinition": "healthcare-ingest-task",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-0df0d84a547289c45"
+            ],
+            "SecurityGroups": [
+              "sg-051fc0d0eed24fcb7"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        }
+      },
+      "Next": "RunTransform"
+    },
+    "RunTransform": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "healthcare-cluster",
+        "TaskDefinition": "healthcare-transform-task",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-059e1de172eec714e"
+            ],
+            "SecurityGroups": [
+              "sg-051fc0d0eed24fcb7"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}
+```
+Note: The subnet setting for each task was obtained by manually running a task and pulling the subnet from a successful task execution. A dedicated security group (listed above) was created for the state machine.
+
+### EventBridge Schedule
+
+!(/image/healthcare-event-schedule.png "healthcare-event-schedule")
