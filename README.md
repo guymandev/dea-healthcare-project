@@ -562,4 +562,4 @@ Note: The subnet setting for each task was obtained by manually running a task a
 
 ### EventBridge Schedule
 
-!(/image/healthcare-event-schedule.png "healthcare-event-schedule")
+![healthcare event schedule](image/healthcare-event-schedule.png)
