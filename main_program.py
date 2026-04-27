@@ -379,9 +379,10 @@ def download_pbj_file(output_dir: Path, *, max_attempts: int = 5) -> Path:
 
 
 # ---------------------------
-# Ingest
+# Ingest - main runner
 # ---------------------------
 def ingest_once() -> Dict[str, Any]:
+
     ingest_dt = date.today().isoformat()
     run_ts = datetime.now(timezone.utc).isoformat()
 
@@ -461,8 +462,8 @@ def ingest_once() -> Dict[str, Any]:
         filename_key = Path(filename).name
         dataset_key = dataset_key_from_filename(filename)
 
-        if "ownership" in filename.lower():
-            print("OWNERSHIP FILE SEEN:", filename)
+        # if "ownership" in filename.lower():
+        #     print("OWNERSHIP FILE SEEN:", filename)
 
         try:
             checksum = sha256_file(file_path)
@@ -549,18 +550,18 @@ def ingest_once() -> Dict[str, Any]:
     latest_manifest["manifest_kind"] = "latest_state"
     latest_manifest["archive_manifest_s3_key"] = archive_key
 
-    state_by_name: Dict[str, Dict[str, Any]] = {}
+    file_state_by_name: Dict[str, Dict[str, Any]] = {}
 
     # Seed with prior state
     for name, e in prior_by_name.items():
-        state_by_name[name] = dict(e)
+        file_state_by_name[name] = dict(e)
 
     # Apply skipped: preserve prior s3_key/dataset_key/data_ingest_dt
     for e in manifest["skipped_unchanged"]:
         name = Path(e["filename"]).name
-        prev = state_by_name.get(name, {})
+        prev = file_state_by_name.get(name, {})
 
-        state_by_name[name] = {
+        file_state_by_name[name] = {
             **prev,
             "filename": name,
             "sha256": e.get("sha256"),
@@ -569,17 +570,17 @@ def ingest_once() -> Dict[str, Any]:
             "last_seen_run_ts_utc": run_ts,
         }
 
-        if not state_by_name[name].get("data_ingest_dt"):
-            state_by_name[name]["data_ingest_dt"] = extract_ingest_dt_from_s3_key(
-                state_by_name[name].get("s3_key")
+        if not file_state_by_name[name].get("data_ingest_dt"):
+            file_state_by_name[name]["data_ingest_dt"] = extract_ingest_dt_from_s3_key(
+                file_state_by_name[name].get("s3_key")
             )
 
     # Apply uploads/re-uploads
     for e in manifest["files"]:
         name = Path(e["filename"]).name
-        state_by_name[name] = dict(e)
+        file_state_by_name[name] = dict(e)
 
-    latest_manifest["files"] = list(state_by_name.values())
+    latest_manifest["files"] = list(file_state_by_name.values())
     latest_manifest["all_files"] = latest_manifest["files"]
 
     s3_put_json(BUCKET, LATEST_MANIFEST_KEY, latest_manifest)
