@@ -406,6 +406,30 @@ Local development was done via an IAM user configured with the following policy 
                 "logs:DescribeLogStreams"
             ],
             "Resource": "*"
+        },
+        {
+            "Sid": "ECRAuthToken",
+            "Effect": "Allow",
+            "Action": "ecr:GetAuthorizationToken",
+            "Resource": "*"
+        },
+        {
+            "Sid": "ECRReposUsEast1",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:CreateRepository",
+                "ecr:DescribeRepositories",
+                "ecr:DescribeImages",
+                "ecr:ListImages",
+                "ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage"
+            ],
+            "Resource": "arn:aws:ecr:us-east-1:662505430425:repository/*"
         }
     ]
 }
@@ -607,3 +631,53 @@ It output a final summary on the bash command line and saved off in a text file,
 - best_key_uniqueness_ratio
 
 In addition, the module generated two additional CSV output file artifacts: 1) a file containing the final summary output from the above, and 2) a separate file detailing potential key field candidates based on the analysis done by the logic in the module. 
+
+## Create & Push docker images to AWS Elastic Container Registry (ECS)
+
+1. Create ECRs in AWS:
+    1. healthcare-ingest
+    2. healthcare-transform
+2. Update Dockerfile so that it references the correct file for the image you want to build:
+
+**healthcare-ingest**
+
+```
+FROM python:3.12-slim
+WORKDIR /app
+COPY clean_requirements.txt .
+RUN pip install --no-cache-dir -r clean_requirements.txt
+#COPY run_transform.py .
+#CMD ["python", "run_transform.py"]
+COPY main_program.py .
+CMD ["python", "main_program.py"]
+```
+
+OR
+
+**healthcare-transform**
+
+```
+FROM python:3.12-slim
+WORKDIR /app
+COPY clean_requirements.txt .
+RUN pip install --no-cache-dir -r clean_requirements.txt
+COPY run_transform.py .
+CMD ["python", "run_transform.py"]
+#COPY main_program.py .
+#CMD ["python", "main_program.py"]
+```
+
+3. Set AWS profile for ECR bash commands, e.g.:
+    - export AWS_PROFILE=healthcare-dev
+4. Generate temp login key to ECR and pipe it to Docker:
+    - aws ecr get-login-password | docker login --username AWS --password-stdin <AWS USER ID>.dkr.ecr.<AWS REGION>.amazonaws.com
+5. Build the docker image
+    1. healthcare-ingest
+	    - docker build -t healthcare-ingest:latest .
+	2. healthcare-transform
+	    - docker build -t healthcare-transform:latest .
+6. Push the image to the ECR
+    1. healthcare-ingest
+		- docker push <AWS USER ID>.<AWS REGION>.amazonaws.com/healthcare-ingest:latest
+    2. healthcare-transform
+        - docker push <AWS USER ID>.<AWS REGION>.amazonaws.com/healthcare-transform:latest
