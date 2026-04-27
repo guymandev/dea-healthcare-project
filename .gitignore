@@ -5,17 +5,30 @@ data/
 data2/
 reports/
 data_download/
+data_lake/
 
 # python
 __pycache__/
 *.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual environments
 .venv/
 venv/
 env/
+clean_env/
+py3_12/
+
+# Personal/local files
+GuySelfie.jpg
 
 # jupyter
 .ipynb_checkpoints/
 
-# OS / editor
+# OS/editor
 .DS_Store
 .vscode/
+EOF
