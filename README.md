@@ -102,6 +102,12 @@ Athena is used to execute SQL for:
 ### AWS Glue Data Catalog
 Glue is used as the metadata layer for table discovery and partition inspection. The transform runner queries Glue to determine which tables are partitioned and what their underlying S3 locations are. 
 
+Two distinct Glue databases were created to logically separate raw S3 tables from curated S3 tables, which were targeted by Streamlit.
+
+#### Glue Databases
+- healthcare_catalog_db
+- healthcare_curated_db
+
 ### AWS Step Functions
 Step Functions orchestrates the full pipeline by running the ingest task first and the transform task second.
 
