@@ -309,7 +309,7 @@ The project includes several built-in observability and quality mechanisms:
 
 ## Addendum
 
-Local development was done via an IAM user configured with the following policy details:
+Local development was done via an IAM user ("healthcare_local_dev_user") configured with the following policy details, saved under "healthcare_local_dev_policy":
 
 ```
 {
@@ -463,6 +463,7 @@ ECR access was managed via a dedicated policy ("healthcare-ecr-policy"), as desc
             "Action": [
                 "s3:GetObject",
                 "s3:PutObject",
+                "s3:DeleteObject",
                 "s3:ListBucket",
                 "s3:GetBucketLocation"
             ],
@@ -490,6 +491,7 @@ ECR access was managed via a dedicated policy ("healthcare-ecr-policy"), as desc
                 "glue:GetDatabase",
                 "glue:GetTable",
                 "glue:GetPartition",
+                "glue:GetPartitions",
                 "glue:GetTables",
                 "glue:GetDatabases",
                 "glue:CreateTable",
@@ -542,8 +544,9 @@ ECR access was managed via a dedicated policy ("healthcare-ecr-policy"), as desc
 ```
 The "healthcare-ecr-policy" is utilized by:
 
-- healthcare-ecr-role
 - healthcare-ingest-task-role
+
+That role is used to execute the ECS tasks below.
 
 ### ECRs
 
@@ -651,6 +654,7 @@ In addition, the module generated two additional CSV output file artifacts: 1) a
 FROM python:3.12-slim
 WORKDIR /app
 COPY clean_requirements.txt .
+#COPY sql/ ./sql/
 RUN pip install --no-cache-dir -r clean_requirements.txt
 #COPY run_transform.py .
 #CMD ["python", "run_transform.py"]
@@ -666,6 +670,7 @@ OR
 FROM python:3.12-slim
 WORKDIR /app
 COPY clean_requirements.txt .
+COPY sql/ ./sql/
 RUN pip install --no-cache-dir -r clean_requirements.txt
 COPY run_transform.py .
 CMD ["python", "run_transform.py"]
@@ -682,7 +687,12 @@ CMD ["python", "run_transform.py"]
 	    - docker build -t healthcare-ingest:latest .
 	2. healthcare-transform
 	    - docker build -t healthcare-transform:latest .
-6. Push the image to the ECR
+6. Tag the image as "latest"
+    1. healthcare-ingest
+        - docker tag healthcare-ingest:latest <AWS USER ID>.dkr.ecr.<AWS REGION>.amazonaws.com/
+    2. healthcare-transform
+        - docker tag healthcare-transform:latest <AWS USER ID>.dkr.ecr.<AWS REGION>.amazonaws.com/healthcare-transform:latest
+7. Push the image to the ECR
     1. healthcare-ingest
 		- docker push <AWS USER ID>.<AWS REGION>.amazonaws.com/healthcare-ingest:latest
     2. healthcare-transform
