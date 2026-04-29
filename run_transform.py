@@ -249,7 +249,8 @@ def preflight_ctas_output_prefix(
     if s3_prefix_has_objects(s3_prefix):
         if auto_delete_ctas_output:
             print(f"  -> preflight cleanup: deleting non-empty CTAS prefix {s3_prefix}")
-            s3_delete_prefix(s3_prefix)
+            # s3_delete_prefix(s3_prefix)
+            ensure_s3_prefix_deleted(s3_prefix)
         else:
             raise RuntimeError(
                 f"{sql_file} CTAS target prefix is not empty: {s3_prefix}. "
@@ -257,6 +258,24 @@ def preflight_ctas_output_prefix(
                 "Delete the prefix or enable auto_delete_ctas_output."
             )
 
+# Wrapper function to harden delete functionality for S3 tables
+# We add delays and retries to make sure that there are no files remaining in the folder.
+# Otherwise, if the delete is not successful, we raise an error. 
+# This is mostly moot, after discovering the root cause was missing policy
+# permissions for S3 and ECR. However, we're leaving it because it does 
+# give visibility to any issues happening at a lower level. 
+def ensure_s3_prefix_deleted(s3_prefix: str, *, retries: int = 3, delay_s: int = 2) -> None:
+    
+    s3_delete_prefix(s3_prefix)
+
+    for attempt in range(1, retries + 1):
+        if not s3_prefix_has_objects(s3_prefix):
+            return
+        print(f"  -> waiting for prefix to clear ({attempt}/{retries}): {s3_prefix}")
+        time.sleep(delay_s)
+
+    if s3_prefix_has_objects(s3_prefix):
+        raise RuntimeError(f"CTAS target prefix still not empty after delete: {s3_prefix}")
 
 
 def s3_delete_prefix(s3_uri: str) -> None:
@@ -390,6 +409,7 @@ def run_sql_files(
     counters: dict,
     auto_delete_ctas_output: bool = True,
 ) -> None:
+    
     for sql_file in files:
         sql_text = sql_file.read_text(encoding="utf-8")
 
@@ -456,7 +476,8 @@ def run_sql_files(
                 # but leaving it in place is harmless.
                 if i == 1 and s3_prefix:
                     print(f"  -> deleting S3 prefix {s3_prefix}")
-                    s3_delete_prefix(s3_prefix)
+                    # s3_delete_prefix(s3_prefix)
+                    ensure_s3_prefix_deleted(s3_prefix)
 
 
 # --------------------------------
@@ -546,7 +567,8 @@ def split_sql_statements(text: str) -> List[str]:
     parts = [p.strip() for p in cleaned_text.split(";")]
     return [p for p in parts if p.strip()]
 
-
+# Generator function that returns list of Path objects to SQL files in the
+# folders passed into the function. 
 def iter_sql_files_for_dirs(dir_names: List[str]) -> Iterable[Path]:
     for d in dir_names:
         folder = SQL_ROOT / d
@@ -615,7 +637,7 @@ def render_sql_with_dataset_ingest_dt(
       {{MANIFEST_RUN_INGEST_DT}}
     """
 
-    def repl(match):
+    def repl(match: re.Match[str]) -> str:
         dataset_key = match.group(1)
         if dataset_key not in dataset_ingest_map:
             raise RuntimeError(
