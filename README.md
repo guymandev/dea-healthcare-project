@@ -14,6 +14,10 @@ The pipeline is organized into two main runtime stages:
 
 The final solution is containerized, deployed to Amazon ECR, executed as ECS/Fargate tasks, orchestrated with AWS Step Functions, and scheduled with EventBridge Scheduler.
 
+### Project Walkthrough
+
+![healthcare project walkthrough](video/healthcare-project-walkthrough.mp4)
+
 ---
 
 ## Design Artifacts
