@@ -16,7 +16,7 @@ The final solution is containerized, deployed to Amazon ECR, executed as ECS/Far
 
 ### Project Walkthrough
 
-![healthcare project walkthrough](video/healthcare-project-walkthrough.mp4)
+[Watch the healthcare project walkthrough](video/healthcare-project-walkthrough.mp4)
 
 ---
 
